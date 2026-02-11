@@ -88,30 +88,13 @@ app = get_face_model()
 # Utils
 # ────────────────────────────────────────────────
 def load_image(file_bytes):
-    """
-    Load image from uploaded bytes — prioritize HEIC/HEIF first since we allow .heic uploads
-    """
     try:
-        # Step 1: Try HEIF/HEIC first (most reliable for these formats)
-        heif_file = pillow_heif.read_heif(file_bytes)
-        img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data)
+        img = Image.open(io.BytesIO(file_bytes))
         img = img.convert("RGB")
         return np.array(img), img
-
-    except pillow_heif.HeifError:
-        # Not a HEIF file → try normal PIL open
-        try:
-            img = Image.open(io.BytesIO(file_bytes))
-            img = img.convert("RGB")
-            return np.array(img), img
-        except Exception as e:
-            st.warning(f"Failed to load image (not HEIF, normal open also failed): {e}")
-            return None, None
-
     except Exception as e:
-        st.warning(f"Unexpected error loading image: {e}")
+        st.warning(f"Failed to load image (HEIC may not be supported yet): {e}")
         return None, None
-
 
 def load_face_db():
     if os.path.exists(EMBEDDINGS_FILE):
