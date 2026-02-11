@@ -1,0 +1,53 @@
+# Virtual environments (huge!)
+venv/
+venv_*/
+.venv/
+env/
+ENV/
+
+# Python caches & bytecode
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+
+# Build / packaging output (PyInstaller etc.)
+build/
+dist/
+*.spec               # ← optional: remove this line if you WANT to commit FaceAttendance.spec
+*.egg-info/
+*.egg
+
+# Data & sensitive files (face embeddings, db, photos)
+data/
+*.pkl
+*.db
+*.sqlite
+*.sqlite3
+
+# Images / icons (unless you want them public)
+*.png               # OnTech.png etc.
+*.ico
+*.jpg
+*.jpeg
+*.heic
+
+# Temp / editor files
+*.log
+*.tmp
+*.bak
+~*
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# IDE / editor folders
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Windows junk
+Thumbs.db
+ehthumbs.db
