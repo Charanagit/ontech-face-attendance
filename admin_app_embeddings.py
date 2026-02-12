@@ -8,7 +8,6 @@ import pandas as pd
 from PIL import Image
 import cv2
 from insightface.app import FaceAnalysis
-import pillow_heif
 import datetime
 
 from database import (
@@ -93,9 +92,9 @@ def load_image(file_bytes):
         img = img.convert("RGB")
         return np.array(img), img
     except Exception as e:
-        st.warning(f"Failed to load image (HEIC may not be supported yet): {e}")
+        st.warning(f"Failed to load image: {e}")
         return None, None
-
+    
 def load_face_db():
     if os.path.exists(EMBEDDINGS_FILE):
         with open(EMBEDDINGS_FILE, "rb") as f:
@@ -298,9 +297,9 @@ elif page == "Register / Edit Employee":
 
     st.subheader("Face Photos (3+ recommended)")
     uploaded_files = st.file_uploader(
-        "Upload clear face photos (JPG/PNG/HEIC)",
+        "Upload clear face photos (JPG/PNG only)",
         accept_multiple_files=True,
-        type=["jpg", "jpeg", "png", "heic"],
+        type=["jpg", "jpeg", "png"],
         key="uploader"
     )
 
