@@ -4,7 +4,6 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 import cv2
 import numpy as np
-import pickle
 import os
 import time
 import sys
@@ -16,13 +15,40 @@ import winsound
 
 import mediapipe as mp
 
+# Supabase
+SUPABASE_URL = "https://crujjurupavknjwdjjmj.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNydWpqdXJ1cGF2a25qd2Rqam1qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA5NjI0MTAsImV4cCI6MjA4NjUzODQxMH0.MdQDrEHOyQ0mI6HGX986lNMw5cpj5pfUCnKFh88pnzw"
+
+from supabase import create_client, Client
+
+supabase: Client = None
+supabase_connected = False
+
+# Try to connect to Supabase at startup
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    # Quick test query
+    test = supabase.table("employees").select("count(*)", count="exact").execute()
+    supabase_connected = True
+    print(f"Supabase connected successfully – {test.count} employees in cloud")
+except Exception as e:
+    print(f"Supabase connection failed: {str(e)}")
+    messagebox.showwarning(
+        "Cloud Connection Issue",
+        "Cannot connect to cloud database right now.\nContinuing in local mode only.\nCheck internet / credentials."
+    )
+    supabase_connected = False
+
 from database import (
     init_db,
     load_employee_info,
-    mark_present,
-    mark_out,
+    load_all_embeddings as local_load_embeddings,
+    mark_present as local_mark_present,
+    mark_out as local_mark_out,
     is_present_today,
     get_today_present,
+    get_all_employees,
+    load_all_employees,
 )
 
 # ────────────────────────────────────────────────
@@ -36,17 +62,17 @@ else:
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-EMBEDDINGS_FILE = os.path.join(DATA_DIR, "face_db.pkl")
 DB_PATH = os.path.join(DATA_DIR, "employees.db")
 
 COLOR_SUCCESS = (0, 255, 120)
 COLOR_WARNING = (0, 80, 255)
 COLOR_UNKNOWN = (0, 0, 255)
+COLOR_CLOUD    = (0, 200, 255)   # cyan for cloud status
 
 # Tunable parameters
-SIMILARITY_THRESHOLD    = 0.37      # lowered a bit - tune between 0.35–0.42
+SIMILARITY_THRESHOLD    = 0.37
 GESTURE_HOLD_SECONDS    = 2.8
-MIN_TIME_BETWEEN_ACTIONS = 5.0      # seconds
+MIN_TIME_BETWEEN_ACTIONS = 5.0
 SUCCESS_SHOW_SECONDS    = 5.0
 PROCESS_EVERY_N_FRAMES  = 4
 
@@ -54,18 +80,10 @@ PROCESS_EVERY_N_FRAMES  = 4
 # Globals
 # ────────────────────────────────────────────────
 face_db = {}
-if os.path.exists(EMBEDDINGS_FILE):
-    try:
-        with open(EMBEDDINGS_FILE, "rb") as f:
-            face_db = pickle.load(f)
-        print(f"Loaded {len(face_db)} identities")
-    except Exception as e:
-        print(f"face_db load failed: {e}")
-
 success_message_start = None
 success_message_text = ""
-gesture_active_until = 0.0          # main fix for checkout persistence
-last_action_time = {}               # per employee cooldown
+gesture_active_until = 0.0
+last_action_time = {}
 
 # ────────────────────────────────────────────────
 # Lazy-load InsightFace
@@ -87,7 +105,110 @@ def get_face_analyzer():
     return face_analyzer
 
 # ────────────────────────────────────────────────
-# Utils
+# Supabase + Local Hybrid Functions
+# ────────────────────────────────────────────────
+
+def load_all_embeddings():
+    global face_db
+    if supabase_connected:
+        try:
+            response = supabase.table("employees").select("emp_code, embedding").execute()
+            face_db = {}
+            for row in response.data:
+                if row.get("embedding"):
+                    try:
+                        emb = np.frombuffer(row["embedding"], dtype=np.float32)
+                        face_db[row["emp_code"]] = emb
+                    except Exception as e:
+                        print(f"Bad embedding for {row['emp_code']}: {e}")
+            print(f"Loaded {len(face_db)} embeddings from Supabase")
+            return face_db
+        except Exception as e:
+            print(f"Supabase load failed: {e} → falling back to local")
+    
+    # Fallback to local SQLite
+    face_db = local_load_embeddings()
+    print(f"Fallback: loaded {len(face_db)} embeddings from local DB")
+    return face_db
+
+
+def mark_present(emp_code: str) -> bool:
+    emp_code = emp_code.strip().upper()
+    now = datetime.datetime.now()
+    today = now.date().isoformat()
+    time_str = now.strftime("%H:%M:%S")
+    
+    success = False
+    
+    if supabase_connected:
+        try:
+            existing = supabase.table("attendance")\
+                .select("id")\
+                .eq("emp_code", emp_code)\
+                .eq("checkin_date", today)\
+                .execute()
+            
+            if existing.data:
+                print(f"{emp_code} already checked in today (cloud)")
+                return False
+            
+            supabase.table("attendance").insert({
+                "emp_code": emp_code,
+                "checkin_date": today,
+                "checkin_time": time_str
+            }).execute()
+            print(f"Cloud check-in: {emp_code}")
+            success = True
+        except Exception as e:
+            print(f"Cloud check-in failed: {e}")
+    
+    # Local fallback or confirmation
+    if local_mark_present(emp_code):
+        print(f"Local check-in recorded: {emp_code}")
+        success = True
+    
+    return success
+
+
+def mark_out(emp_code: str) -> bool:
+    emp_code = emp_code.strip().upper()
+    now = datetime.datetime.now()
+    time_str = now.strftime("%H:%M:%S")
+    
+    success = False
+    
+    if supabase_connected:
+        try:
+            response = supabase.table("attendance")\
+                .select("id, checkout_time")\
+                .eq("emp_code", emp_code)\
+                .eq("checkin_date", now.date().isoformat())\
+                .order("id", desc=True)\
+                .limit(1)\
+                .execute()
+            
+            if not response.data or response.data[0].get("checkout_time"):
+                print(f"No valid check-in for checkout (cloud): {emp_code}")
+            else:
+                record_id = response.data[0]["id"]
+                supabase.table("attendance")\
+                    .update({"checkout_time": time_str})\
+                    .eq("id", record_id)\
+                    .execute()
+                print(f"Cloud check-out: {emp_code}")
+                success = True
+        except Exception as e:
+            print(f"Cloud check-out failed: {e}")
+    
+    # Local fallback
+    if local_mark_out(emp_code):
+        print(f"Local check-out recorded: {emp_code}")
+        success = True
+    
+    return success
+
+# ────────────────────────────────────────────────
+# Utils (unchanged)
 # ────────────────────────────────────────────────
 def normalize(v):
     norm = np.linalg.norm(v)
@@ -99,16 +220,15 @@ def cosine_similarity(a, b):
 def is_victory_gesture(lm):
     if not lm:
         return False
-    # Slightly more forgiving thresholds
     return (
-        lm[8].y  < lm[6].y  - 0.018 and   # index tip above PIP
-        lm[12].y < lm[10].y - 0.018 and   # middle tip above PIP
-        lm[16].y > lm[14].y + 0.008 and   # ring down
-        lm[20].y > lm[18].y + 0.008       # pinky down
+        lm[8].y  < lm[6].y  - 0.018 and
+        lm[12].y < lm[10].y - 0.018 and
+        lm[16].y > lm[14].y + 0.008 and
+        lm[20].y > lm[18].y + 0.008
     )
 
 # ────────────────────────────────────────────────
-# Splash screen (kept as is)
+# Splash screen (unchanged)
 # ────────────────────────────────────────────────
 def show_splash():
     logo_path = os.path.join(BASE_DIR, "OnTech.png")
@@ -138,7 +258,7 @@ def show_splash():
 
     cv2.waitKey(1500)
 
-    for alpha in range(255, -1, -8):
+    for alpha in range(255, -1, 8):
         blended = cv2.addWeighted(bg, alpha/255.0, np.zeros_like(bg), 1 - alpha/255.0, 0)
         cv2.imshow(win_name, blended)
         cv2.waitKey(20)
@@ -147,7 +267,7 @@ def show_splash():
     return True
 
 # ────────────────────────────────────────────────
-# UI helper windows (kept almost as is)
+# UI helper windows (updated to use load_all_employees)
 # ────────────────────────────────────────────────
 def show_employee_list():
     top = tk.Toplevel()
@@ -164,7 +284,6 @@ def show_employee_list():
     tree.heading("Notes", text="Notes")
     tree.heading("Today", text="Present Today")
 
-    # column widths...
     tree.column("Code", width=90, anchor="center")
     tree.column("Name", width=170)
     tree.column("Dept", width=130)
@@ -179,12 +298,13 @@ def show_employee_list():
     tree.configure(yscroll=sb.set)
     sb.pack(side="right", fill="y")
 
-    if not face_db:
+    employees = load_all_employees()
+    if not employees:
         tree.insert("", "end", values=("", "No employees yet", "", "", "", "", ""))
         return
 
-    for code in sorted(face_db):
-        name, dept, desig, mob, notes = load_employee_info(code)
+    for emp in employees:
+        code, name, dept, desig, mob, notes = emp
         pres = is_present_today(code)
         tag = "present" if pres.startswith("Yes") else "absent"
         tree.insert("", "end", values=(code, name, dept, desig, mob,
@@ -193,6 +313,7 @@ def show_employee_list():
 
     tree.tag_configure("present", foreground="green")
     tree.tag_configure("absent", foreground="gray")
+
 
 def show_today_attendance():
     top = tk.Toplevel()
@@ -229,7 +350,7 @@ def show_today_attendance():
         tree.insert("", "end", values=("", "No check-ins today", "", "", ""))
 
 # ────────────────────────────────────────────────
-# Recognition loop (improved stability)
+# Recognition loop
 # ────────────────────────────────────────────────
 def run_attendance_recognition():
     global success_message_start, success_message_text, gesture_active_until
@@ -238,6 +359,13 @@ def run_attendance_recognition():
     if analyzer is None:
         messagebox.showerror("Error", "Cannot load face model.")
         return
+
+    # Load embeddings (tries cloud first, then local)
+    global face_db
+    face_db = load_all_embeddings()
+
+    if not face_db:
+        messagebox.showwarning("Warning", "No registered faces found.\nOnly 'Unknown' will be detected.")
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -274,7 +402,7 @@ def run_attendance_recognition():
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("Camera frame lost → trying to recover...")
+            print("Camera frame lost → recovering...")
             cap.release()
             cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             if not cap.isOpened():
@@ -286,7 +414,7 @@ def run_attendance_recognition():
         frame_count += 1
         now = time.time()
 
-        # ── Gesture detection every frame ──
+        # Gesture detection
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             hand_results = hands.process(rgb)
@@ -299,11 +427,11 @@ def run_attendance_recognition():
                     )
                     if is_victory_gesture(hlm.landmark):
                         gesture_active_until = now + GESTURE_HOLD_SECONDS
-                        winsound.Beep(1800, 80)  # short high beep = gesture seen
+                        winsound.Beep(1800, 80)
         except Exception as e:
             print(f"Hand processing error: {e}")
 
-        # ── Face processing every N frames ──
+        # Face processing
         if frame_count % PROCESS_EVERY_N_FRAMES == 0:
             try:
                 faces = analyzer.get(frame)
@@ -332,7 +460,7 @@ def run_attendance_recognition():
                 print(f"Face processing error: {e}")
                 last_results = []
 
-        # ── Draw results & decide action ──
+        # Draw & action
         for bbox, dname, score, det_conf, code in last_results:
             x1,y1,x2,y2 = map(int, bbox)
             color = COLOR_SUCCESS if dname != "Unknown" else COLOR_UNKNOWN
@@ -360,11 +488,11 @@ def run_attendance_recognition():
                 action_text = ""
 
                 if is_checkout:
-                    print(f"CHECK-OUT attempt → {code}  sim={score:.3f}")
+                    print(f"CHECK-OUT → {code}")
                     success = mark_out(code)
                     action_text = "CHECKED OUT"
                 else:
-                    print(f"CHECK-IN attempt → {code}  sim={score:.3f}")
+                    print(f"CHECK-IN → {code}")
                     success = mark_present(code)
                     action_text = "CHECKED IN"
 
@@ -375,14 +503,22 @@ def run_attendance_recognition():
                     success_message_start = now
                     print(f"SUCCESS: {action_text} {code}")
 
-        # ── Success overlay ──
+        # Success overlay
         if success_message_start and (now - success_message_start < SUCCESS_SHOW_SECONDS):
             cv2.putText(display_frame, success_message_text, (140, 160),
                         cv2.FONT_HERSHEY_DUPLEX, 2.2, COLOR_SUCCESS, 6)
             cv2.putText(display_frame, datetime.datetime.now().strftime("%H:%M:%S"),
                         (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.3, COLOR_SUCCESS, 3)
 
-        # ── FPS + hint ──
+        # Status overlays
+        db_status = f"Loaded {len(face_db)} faces"
+        if supabase_connected:
+            db_status += " (cloud)"
+        else:
+            db_status += " (local only)"
+        cv2.putText(display_frame, db_status, (25, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_CLOUD if supabase_connected else COLOR_WARNING, 2)
+
         fps = 1 / (now - prev_time) if now > prev_time else 0
         prev_time = now
         cv2.putText(display_frame, f"FPS: {fps:.1f}", (25, 45),
@@ -403,10 +539,13 @@ def run_attendance_recognition():
     hands.close()
 
 # ────────────────────────────────────────────────
-# Kiosk Dashboard (your original beautiful UI)
+# Kiosk Dashboard
 # ────────────────────────────────────────────────
 def launch_kiosk():
     init_db()
+
+    global face_db
+    face_db = load_all_embeddings()
 
     root = tk.Tk()
     root.title("Ontech Attendance Kiosk")

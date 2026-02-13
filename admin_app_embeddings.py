@@ -2,7 +2,6 @@
 import streamlit as st
 import os
 import io
-import pickle
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -19,7 +18,7 @@ from database import (
     get_attendance_for_date,
     get_all_employees,
     get_attendance_history_for_employee,
-    get_attendance_for_employee_date
+    get_attendance_for_employee_date,
 )
 
 # ────────────────────────────────────────────────
@@ -57,8 +56,6 @@ st.markdown(f"""
 # ────────────────────────────────────────────────
 BASE_FOLDER = "data"
 DATASET_FOLDER = os.path.join(BASE_FOLDER, "dataset")
-EMBEDDINGS_FILE = os.path.join(BASE_FOLDER, "face_db.pkl")
-
 os.makedirs(DATASET_FOLDER, exist_ok=True)
 init_db()
 
@@ -94,17 +91,6 @@ def load_image(file_bytes):
     except Exception as e:
         st.warning(f"Failed to load image: {e}")
         return None, None
-    
-def load_face_db():
-    if os.path.exists(EMBEDDINGS_FILE):
-        with open(EMBEDDINGS_FILE, "rb") as f:
-            return pickle.load(f)
-    return {}
-
-
-def save_face_db(face_db):
-    with open(EMBEDDINGS_FILE, "wb") as f:
-        pickle.dump(face_db, f)
 
 
 def normalize(vec):
@@ -113,23 +99,14 @@ def normalize(vec):
 
 
 # ────────────────────────────────────────────────
-# Core logic: process employee + photos
+# Core logic: process employee + photos (fixed redundant save)
 # ────────────────────────────────────────────────
 def process_employee(emp_code, full_name, department, designation, mobile, notes, uploaded_files):
     messages = []
 
-    save_employee(
-        emp_code=emp_code,
-        full_name=full_name,
-        department=department,
-        designation=designation,
-        mobile=mobile,
-        notes=notes
-    )
-    messages.append(f"Employee **{emp_code}** saved/updated")
+    embedding_to_save = None
 
     if uploaded_files:
-        face_db = load_face_db()
         embeddings = []
         emp_folder = os.path.join(DATASET_FOLDER, emp_code)
         os.makedirs(emp_folder, exist_ok=True)
@@ -154,14 +131,31 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
             img_pil.save(os.path.join(emp_folder, fname))
 
         if len(embeddings) >= 3:
-            mean_emb = normalize(np.mean(embeddings, axis=0))
-            face_db[emp_code] = mean_emb
-            save_face_db(face_db)
+            embedding_to_save = normalize(np.mean(embeddings, axis=0))
             messages.append(f"Embedding created successfully ({len(embeddings)} images)")
         elif len(embeddings) > 0:
-            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3)")
+            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3 for good embedding)")
         else:
-            messages.append("⚠️ No usable face images → embedding unchanged")
+            messages.append("⚠️ No usable face images → no embedding saved")
+
+    # Single save call – with or without embedding
+    with st.spinner("Saving employee..."):
+        try:
+            success = save_employee(
+                emp_code=emp_code,
+                full_name=full_name,
+                department=department,
+                designation=designation,
+                mobile=mobile,
+                notes=notes,
+                embedding=embedding_to_save
+            )
+            if success:
+                messages.append(f"Employee **{emp_code}** saved/updated successfully")
+            else:
+                messages.append(f"⚠️ Failed to save employee {emp_code}")
+        except Exception as e:
+            messages.append(f"Database error: {str(e)}")
 
     return messages
 
@@ -183,24 +177,23 @@ page = st.sidebar.radio(
 
 
 # ────────────────────────────────────────────────
-# Main Dashboard (Overview) - Restored + Improved
+# Main Dashboard (Overview)
 # ────────────────────────────────────────────────
 if page == "Main Dashboard (Overview)":
     st.subheader("Registered Employees & Today's Attendance Status")
 
-    face_db = load_face_db()
+    employees = get_all_employees()
 
-    if face_db:
-        # Get today's attendance
+    if employees:
         today_records = get_today_present()
         present_count = len(today_records)
         today_attendance_dict = {r["emp_code"]: r["checkin_time"] for r in today_records}
 
-        st.caption(f"**Today ({datetime.date.today():%Y-%m-%d})**: {present_count} / {len(face_db)} employees checked in")
+        st.caption(f"**Today ({datetime.date.today():%Y-%m-%d})**: {present_count} / {len(employees)} employees checked in")
 
         employees_data = []
-        for code in sorted(face_db.keys()):
-            name, dept, desig, mob, notes = load_employee_info(code)
+        for emp in employees:
+            code, name, dept, desig, mob, notes = emp
             checkin_time = today_attendance_dict.get(code)
             present_str = f"Yes – {checkin_time}" if checkin_time else "No"
 
@@ -211,13 +204,11 @@ if page == "Main Dashboard (Overview)":
                 "Designation": desig,
                 "Mobile": mob,
                 "Notes": notes[:100] + "…" if len(notes or "") > 100 else (notes or ""),
-                "Present Today": present_str,
-                "Embedding": "Yes"
+                "Present Today": present_str
             })
 
         df = pd.DataFrame(employees_data)
 
-        # Highlight present/absent rows
         def highlight_present(row):
             color = LIGHT_GREEN if row["Present Today"].startswith("Yes") else "#f8d7da"
             return [f'background-color: {color}' if col == "Present Today" else '' for col in df.columns]
@@ -234,11 +225,9 @@ if page == "Main Dashboard (Overview)":
             }
         )
 
-        # Refresh button
         if st.button("🔄 Refresh Attendance Status"):
             st.rerun()
 
-        # Quick edit buttons
         st.markdown("**Quick Edit Employee:**")
         cols = st.columns(6)
         for i, emp in enumerate(employees_data):
@@ -329,7 +318,7 @@ elif page == "Register / Edit Employee":
                 if st.session_state.last_processed == emp_code:
                     st.info("Already processed this code in this session.")
                 else:
-                    with st.spinner("Processing..."):
+                    with st.spinner("Processing employee..."):
                         msgs = process_employee(
                             emp_code=emp_code,
                             full_name=full_name,
