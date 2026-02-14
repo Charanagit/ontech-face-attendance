@@ -24,20 +24,31 @@ from supabase import create_client, Client
 supabase: Client = None
 supabase_connected = False
 
-# Try to connect to Supabase at startup
+print("=== Supabase Debug Start ===")
+print(f"URL: '{SUPABASE_URL}'")   # check for extra spaces/quotes
+print(f"Key (first 20 chars): {SUPABASE_KEY[:20]}... (length: {len(SUPABASE_KEY)})")
+print("Creating client...")
+
 try:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    # Quick test query
-    test = supabase.table("employees").select("count(*)", count="exact").execute()
+    print("create_client returned type:", type(supabase))
+    if supabase is None:
+        raise RuntimeError("create_client returned None - check URL/key format or network")
+    
+    # Minimal ping - just get table metadata
+    ping = supabase.table("employees").select("emp_code", count="planned").limit(0).execute()
+    print("Ping OK - table reachable")
     supabase_connected = True
-    print(f"Supabase connected successfully – {test.count} employees in cloud")
+
 except Exception as e:
-    print(f"Supabase connection failed: {str(e)}")
-    messagebox.showwarning(
-        "Cloud Connection Issue",
-        "Cannot connect to cloud database right now.\nContinuing in local mode only.\nCheck internet / credentials."
-    )
+    print("Supabase init/ping failed:", str(e))
+    import traceback
+    traceback.print_exc()
+    messagebox.showwarning("Cloud Issue", f"Supabase failed:\n{str(e)}\n\nContinuing local only.")
+    supabase = None
     supabase_connected = False
+
+print("=== Supabase Debug End ===")
 
 from database import (
     init_db,
@@ -50,6 +61,17 @@ from database import (
     get_all_employees,
     load_all_employees,
 )
+
+def sync_from_cloud():
+    global face_db
+    if supabase_connected:
+        try:
+            face_db = load_all_embeddings()  # your Supabase version
+            messagebox.showinfo("Sync Complete", f"Loaded {len(face_db)} faces from cloud")
+        except Exception as e:
+            messagebox.showerror("Sync Failed", str(e))
+    else:
+        messagebox.showwarning("No Cloud", "Cannot sync - no connection")
 
 # ────────────────────────────────────────────────
 # Paths & Config
@@ -582,6 +604,8 @@ def launch_kiosk():
         "activebackground": "#334155",
     }
 
+    
+
     def create_button(text, command, bg, fg="#ffffff"):
         btn = tk.Button(btn_frame, text=text, command=command, bg=bg, fg=fg, **button_style)
         btn.pack(pady=14, fill="x")
@@ -597,6 +621,10 @@ def launch_kiosk():
 
     create_button("View All Registered Employees", show_employee_list, "#22c55e")
     create_button("Today's Attendance Records", show_today_attendance, "#06b6d4")
+    create_button("Sync Faces from Cloud",
+    lambda: sync_from_cloud(),
+    "#8b5cf6", "#ffffff"
+)
     create_button("Exit Application", root.quit, "#ef4444")
 
     footer = tk.Label(root, text="Ontech Face Recognition • Powered by InsightFace + MediaPipe",
