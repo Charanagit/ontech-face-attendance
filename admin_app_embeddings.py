@@ -10,6 +10,10 @@ from insightface.app import FaceAnalysis
 import datetime
 from supabase import create_client, Client
 
+
+st.set_page_config(page_title="Ontech Employee Manager", layout="wide")
+
+
 # ────────────────────────────────────────────────
 # Supabase client (using secrets from Streamlit Cloud)
 # Make sure you added these in Settings → Secrets:
@@ -42,7 +46,6 @@ GRAY_BG      = "#0f1316"
 TEXT_DARK    = "#1a1a2e"
 
 # Page config & styling
-st.set_page_config(page_title="Ontech Employee Manager", layout="wide")
 
 st.markdown(f"""
     <style>
