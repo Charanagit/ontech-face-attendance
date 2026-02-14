@@ -10,11 +10,23 @@ from insightface.app import FaceAnalysis
 import datetime
 from supabase import create_client, Client
 
-# Supabase client using secrets
-supabase = create_client(
+# ────────────────────────────────────────────────
+# Supabase client (using secrets from Streamlit Cloud)
+# Make sure you added these in Settings → Secrets:
+# SUPABASE_URL = "https://crujjurupavknjwdjjmj.supabase.co"
+# SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+# ────────────────────────────────────────────────
+supabase: Client = create_client(
     st.secrets["SUPABASE_URL"],
     st.secrets["SUPABASE_KEY"]
 )
+
+# Quick connection test in sidebar
+try:
+    supabase.table("employees").select("emp_code", count="planned").limit(0).execute()
+    st.sidebar.success("Connected to Supabase ✓")
+except Exception as e:
+    st.sidebar.error(f"Supabase connection issue: {str(e)}")
 
 # ────────────────────────────────────────────────
 # Color Palette
@@ -29,6 +41,7 @@ LIGHT_PURPLE = "#5A1919"
 GRAY_BG      = "#0f1316"
 TEXT_DARK    = "#1a1a2e"
 
+# Page config & styling
 st.set_page_config(page_title="Ontech Employee Manager", layout="wide")
 
 st.markdown(f"""
@@ -46,7 +59,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ────────────────────────────────────────────────
-# Paths (only for local photo storage)
+# Paths (only for storing photos locally)
 # ────────────────────────────────────────────────
 BASE_FOLDER = "data"
 DATASET_FOLDER = os.path.join(BASE_FOLDER, "dataset")
@@ -111,12 +124,12 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
 
             faces = app.get(img_cv)
             if len(faces) != 1:
-                st.warning(f"{up_file.name}: {len(faces)} faces → skipped")
+                st.warning(f"{up_file.name}: {len(faces)} faces detected → skipped")
                 continue
 
             face = faces[0]
             if face.det_score < 0.75:
-                st.warning(f"{up_file.name}: low confidence → skipped")
+                st.warning(f"{up_file.name}: low confidence ({face.det_score:.2f}) → skipped")
                 continue
 
             embeddings.append(normalize(face.embedding))
@@ -125,32 +138,32 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
 
         if len(embeddings) >= 3:
             embedding_to_save = normalize(np.mean(embeddings, axis=0)).tolist()  # list for jsonb
-            messages.append(f"Embedding created ({len(embeddings)} photos)")
+            messages.append(f"Embedding created successfully ({len(embeddings)} images)")
         elif len(embeddings) > 0:
-            messages.append(f"Only {len(embeddings)} valid photos (need 3+)")
+            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3)")
         else:
-            messages.append("No valid face photos → no embedding")
+            messages.append("⚠️ No usable face images → embedding not saved")
 
-    # Save to Supabase
+    # Save to Supabase (upsert)
     with st.spinner("Saving to cloud..."):
         try:
             data = {
                 "emp_code": emp_code.strip().upper(),
-                "full_name": full_name.strip(),
-                "department": department.strip(),
-                "designation": designation.strip(),
-                "mobile": mobile.strip(),
-                "notes": notes.strip(),
+                "full_name": full_name.strip() or None,
+                "department": department.strip() or None,
+                "designation": designation.strip() or None,
+                "mobile": mobile.strip() or None,
+                "notes": notes.strip() or None,
                 "registered_date": datetime.datetime.now().isoformat(),
             }
             if embedding_to_save:
                 data["embedding"] = embedding_to_save
 
             supabase.table("employees").upsert(data).execute()
-            messages.append(f"Employee **{emp_code}** saved/updated in cloud")
+            messages.append(f"Employee **{emp_code}** saved/updated in Supabase")
         except Exception as e:
-            messages.append(f"Cloud save failed: {str(e)}")
-            st.error(str(e))
+            messages.append(f"Supabase save failed: {str(e)}")
+            st.error(f"Failed to save to cloud: {str(e)}")
 
     return messages
 
@@ -181,11 +194,11 @@ if page == "Main Dashboard (Overview)":
         response = supabase.table("employees").select("emp_code, full_name, department, designation, mobile, notes").execute()
         employees = response.data
     except Exception as e:
-        st.error(f"Failed to load employees from cloud: {e}")
+        st.error(f"Failed to load employees from Supabase: {e}")
         employees = []
 
     if employees:
-        # Attendance still local for now - can move later
+        # Attendance still uses local DB for now (we can migrate later)
         today_records = get_today_present()
         present_count = len(today_records)
         today_attendance_dict = {r["emp_code"]: r["checkin_time"] for r in today_records}
@@ -246,7 +259,7 @@ if page == "Main Dashboard (Overview)":
                     st.session_state.selected_emp_code = emp["Code"]
                     st.rerun()
     else:
-        st.info("No employees in cloud yet. Register someone below.", icon="ℹ️")
+        st.info("No employees registered in Supabase yet. Add someone below.", icon="ℹ️")
 
 
 # ────────────────────────────────────────────────
@@ -273,9 +286,9 @@ elif page == "Register / Edit Employee":
                 emp_code_value = code
                 st.info(f"Editing employee: **{code}**", icon="✏️")
             else:
-                st.warning("Employee not found in cloud")
+                st.warning("Employee not found in Supabase")
         except Exception as e:
-            st.error(f"Load error: {e}")
+            st.error(f"Failed to load employee: {e}")
 
         if st.button("× Cancel editing", type="secondary"):
             st.session_state.selected_emp_code = None
@@ -354,13 +367,13 @@ elif page == "Register / Edit Employee":
 
 
 # ────────────────────────────────────────────────
-# Today's Attendance Page (still local for now)
+# Today's Attendance Page (still using local DB for now)
 # ────────────────────────────────────────────────
 elif page == "Today's Attendance":
     st.subheader("Today's Attendance")
 
     today = datetime.date.today().isoformat()
-    records = get_attendance_for_date(today)
+    records = get_today_present()
 
     if records:
         df_today = pd.DataFrame(records)
@@ -375,7 +388,9 @@ elif page == "Today's Attendance":
         st.info("No attendance records today yet.", icon="ℹ️")
 
 
-# Employee Attendance History & Daily Report (still local - can be moved later)
+# ────────────────────────────────────────────────
+# Employee Attendance History Page (local for now)
+# ────────────────────────────────────────────────
 elif page == "Employee Attendance History":
     st.subheader("Employee Attendance History")
 
@@ -410,6 +425,10 @@ elif page == "Employee Attendance History":
             else:
                 st.warning("No attendance records found in selected date range.")
 
+
+# ────────────────────────────────────────────────
+# Daily Attendance Report Page (local for now)
+# ────────────────────────────────────────────────
 elif page == "Daily Attendance Report":
     st.subheader("Daily Attendance Report")
 
