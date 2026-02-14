@@ -10,27 +10,28 @@ from insightface.app import FaceAnalysis
 import datetime
 from supabase import create_client, Client
 
-
+# ────────────────────────────────────────────────
+# Page config — MUST BE FIRST Streamlit command
+# ────────────────────────────────────────────────
 st.set_page_config(page_title="Ontech Employee Manager", layout="wide")
 
-
 # ────────────────────────────────────────────────
-# Supabase client (using secrets from Streamlit Cloud)
-# Make sure you added these in Settings → Secrets:
+# Supabase client (using secrets)
+# Make sure you added in Streamlit Cloud Settings → Secrets:
 # SUPABASE_URL = "https://crujjurupavknjwdjjmj.supabase.co"
 # SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 # ────────────────────────────────────────────────
-supabase: Client = create_client(
-    st.secrets["SUPABASE_URL"],
-    st.secrets["SUPABASE_KEY"]
-)
-
-# Quick connection test in sidebar
 try:
+    supabase = create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"]
+    )
+    # Quick connection test
     supabase.table("employees").select("emp_code", count="planned").limit(0).execute()
     st.sidebar.success("Connected to Supabase ✓")
 except Exception as e:
     st.sidebar.error(f"Supabase connection issue: {str(e)}")
+    supabase = None
 
 # ────────────────────────────────────────────────
 # Color Palette
@@ -44,8 +45,6 @@ PURPLE_ACCENT = "#7e57c2"
 LIGHT_PURPLE = "#5A1919"
 GRAY_BG      = "#0f1316"
 TEXT_DARK    = "#1a1a2e"
-
-# Page config & styling
 
 st.markdown(f"""
     <style>
@@ -62,7 +61,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ────────────────────────────────────────────────
-# Paths (only for storing photos locally)
+# Paths (only for local photo storage)
 # ────────────────────────────────────────────────
 BASE_FOLDER = "data"
 DATASET_FOLDER = os.path.join(BASE_FOLDER, "dataset")
@@ -113,6 +112,12 @@ def normalize(vec):
 def process_employee(emp_code, full_name, department, designation, mobile, notes, uploaded_files):
     messages = []
 
+    if not emp_code.strip():
+        messages.append("Error: Employee Code is required")
+        return messages
+
+    emp_code = emp_code.strip().upper()  # enforce uppercase
+
     embedding_to_save = None
 
     if uploaded_files:
@@ -121,37 +126,45 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
         os.makedirs(emp_folder, exist_ok=True)
 
         for up_file in uploaded_files:
-            img_cv, img_pil = load_image(up_file.getvalue())
-            if img_cv is None:
-                continue
+            try:
+                if up_file.size > 5 * 1024 * 1024:  # 5MB limit
+                    messages.append(f"{up_file.name} too large (>5MB) → skipped")
+                    continue
 
-            faces = app.get(img_cv)
-            if len(faces) != 1:
-                st.warning(f"{up_file.name}: {len(faces)} faces detected → skipped")
-                continue
+                img_cv, img_pil = load_image(up_file.getvalue())
+                if img_cv is None:
+                    messages.append(f"Failed to load {up_file.name}")
+                    continue
 
-            face = faces[0]
-            if face.det_score < 0.75:
-                st.warning(f"{up_file.name}: low confidence ({face.det_score:.2f}) → skipped")
-                continue
+                faces = app.get(img_cv)
+                if len(faces) != 1:
+                    messages.append(f"{up_file.name}: {len(faces)} faces detected → skipped")
+                    continue
 
-            embeddings.append(normalize(face.embedding))
-            fname = os.path.splitext(up_file.name)[0] + ".png"
-            img_pil.save(os.path.join(emp_folder, fname))
+                face = faces[0]
+                if face.det_score < 0.75:
+                    messages.append(f"{up_file.name}: low confidence ({face.det_score:.2f}) → skipped")
+                    continue
+
+                embeddings.append(normalize(face.embedding))
+                fname = os.path.splitext(up_file.name)[0] + ".png"
+                img_pil.save(os.path.join(emp_folder, fname))
+            except Exception as e:
+                messages.append(f"Error processing {up_file.name}: {str(e)}")
 
         if len(embeddings) >= 3:
-            embedding_to_save = normalize(np.mean(embeddings, axis=0)).tolist()  # list for jsonb
-            messages.append(f"Embedding created successfully ({len(embeddings)} images)")
+            embedding_to_save = normalize(np.mean(embeddings, axis=0)).tolist()
+            messages.append(f"Embedding created from {len(embeddings)} photos")
         elif len(embeddings) > 0:
-            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3)")
+            messages.append(f"Only {len(embeddings)} valid photos (need ≥3)")
         else:
-            messages.append("⚠️ No usable face images → embedding not saved")
+            messages.append("No usable face photos → saving without embedding")
 
-    # Save to Supabase (upsert)
-    with st.spinner("Saving to cloud..."):
+    # Save to Supabase
+    with st.spinner("Saving to Supabase..."):
         try:
             data = {
-                "emp_code": emp_code.strip().upper(),
+                "emp_code": emp_code,
                 "full_name": full_name.strip() or None,
                 "department": department.strip() or None,
                 "designation": designation.strip() or None,
@@ -163,10 +176,10 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
                 data["embedding"] = embedding_to_save
 
             supabase.table("employees").upsert(data).execute()
-            messages.append(f"Employee **{emp_code}** saved/updated in Supabase")
+            messages.append(f"Employee **{emp_code}** successfully saved/updated in Supabase")
         except Exception as e:
             messages.append(f"Supabase save failed: {str(e)}")
-            st.error(f"Failed to save to cloud: {str(e)}")
+            st.error(f"Failed to save employee: {str(e)}")
 
     return messages
 
@@ -201,7 +214,7 @@ if page == "Main Dashboard (Overview)":
         employees = []
 
     if employees:
-        # Attendance still uses local DB for now (we can migrate later)
+        # Attendance still local for now
         today_records = get_today_present()
         present_count = len(today_records)
         today_attendance_dict = {r["emp_code"]: r["checkin_time"] for r in today_records}
@@ -311,23 +324,29 @@ elif page == "Register / Edit Employee":
 
     notes = st.text_area("Notes / Remarks", value=notes_value, height=110, key="notes")
 
-    st.subheader("Face Photos (3+ recommended)")
+    st.subheader("Face Photos (max 5 files, 5MB each)")
     uploaded_files = st.file_uploader(
         "Upload clear face photos (JPG/PNG only)",
         accept_multiple_files=True,
         type=["jpg", "jpeg", "png"],
-        key="uploader"
+        key="uploader",
+        help="Upload 3–5 front-facing photos for best recognition"
     )
 
     if uploaded_files:
-        st.write(f"Uploaded {len(uploaded_files)} file(s):")
-        cols = st.columns(min(5, len(uploaded_files) or 1))
-        for i, file in enumerate(uploaded_files):
-            try:
-                img = Image.open(file)
-                cols[i % len(cols)].image(img, caption=file.name, use_column_width=True)
-            except:
-                st.warning(f"Cannot preview {file.name}")
+        valid_files = [f for f in uploaded_files if f.size <= 5 * 1024 * 1024]
+        if len(valid_files) < len(uploaded_files):
+            st.warning(f"Skipped {len(uploaded_files) - len(valid_files)} files >5MB")
+
+        if valid_files:
+            st.write(f"Processing {len(valid_files)} valid file(s):")
+            cols = st.columns(min(5, len(valid_files)))
+            for i, file in enumerate(valid_files):
+                try:
+                    img = Image.open(file)
+                    cols[i % len(cols)].image(img, caption=file.name, use_column_width=True)
+                except Exception as e:
+                    st.warning(f"Cannot preview {file.name}: {e}")
 
     col_btn1, col_btn2 = st.columns([4, 2])
 
@@ -370,7 +389,7 @@ elif page == "Register / Edit Employee":
 
 
 # ────────────────────────────────────────────────
-# Today's Attendance Page (still using local DB for now)
+# Today's Attendance Page (still local)
 # ────────────────────────────────────────────────
 elif page == "Today's Attendance":
     st.subheader("Today's Attendance")
@@ -392,7 +411,7 @@ elif page == "Today's Attendance":
 
 
 # ────────────────────────────────────────────────
-# Employee Attendance History Page (local for now)
+# Employee Attendance History Page (local)
 # ────────────────────────────────────────────────
 elif page == "Employee Attendance History":
     st.subheader("Employee Attendance History")
@@ -430,7 +449,7 @@ elif page == "Employee Attendance History":
 
 
 # ────────────────────────────────────────────────
-# Daily Attendance Report Page (local for now)
+# Daily Attendance Report Page (local)
 # ────────────────────────────────────────────────
 elif page == "Daily Attendance Report":
     st.subheader("Daily Attendance Report")
