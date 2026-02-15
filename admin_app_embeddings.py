@@ -89,6 +89,16 @@ def get_face_model():
 
 app = get_face_model()
 
+# Debug InsightFace output dimension
+print("InsightFace model loaded. Testing embedding size...")
+test_img = np.zeros((640, 640, 3), dtype=np.uint8) + 127  # gray image to force detection
+test_faces = app.get(test_img)
+if test_faces:
+    emb_test = test_faces[0].embedding
+    print(f"Test face embedding shape: {emb_test.shape}, dtype: {emb_test.dtype}, bytes: {len(emb_test.tobytes())}")
+else:
+    print("No face detected in test image — model may need real photo")
+
 # ────────────────────────────────────────────────
 # Utils
 # ────────────────────────────────────────────────

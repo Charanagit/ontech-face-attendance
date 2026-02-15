@@ -123,50 +123,51 @@ def load_all_from_supabase():
 
             emb_raw = row.get("embedding")
             if emb_raw is not None:
-                try:
-                    print(f"Processing embedding for {code} (type: {type(emb_raw).__name__}, len: {len(emb_raw) if isinstance(emb_raw, str) else 'bytes'})")
-
-                    if isinstance(emb_raw, bytes):
-                        emb_bytes = emb_raw
-                        print(f"Raw bytes → {len(emb_bytes)} bytes")
-
-                    elif isinstance(emb_raw, str):
-                        # Aggressive clean + force padding
-                        emb_clean = emb_raw.strip().replace("\n", "").replace("\r", "").replace(" ", "")
-                        print(f"Cleaned string length: {len(emb_clean)}")
-                        
-                        # Force add padding even if length % 4 == 0 (sometimes helps)
-                        padding = (4 - len(emb_clean) % 4) % 4
-                        emb_clean += "=" * padding
-                        print(f"After padding: {len(emb_clean)} chars")
-
                         try:
-                            emb_bytes = base64.b64decode(emb_clean)
-                            print(f"Strict decode OK → {len(emb_bytes)} bytes")
+                            print(f"Processing embedding for {code} (type: {type(emb_raw).__name__}, len: {len(emb_raw) if isinstance(emb_raw, (str, bytes)) else 'n/a'})")
+
+                            if isinstance(emb_raw, bytes):
+                                emb_bytes = emb_raw
+                                print(f"Direct bytes → {len(emb_bytes)} bytes")
+
+                            elif isinstance(emb_raw, str):
+                                emb_clean = emb_raw.strip()
+
+                                # Detect Postgres hex dump (\x...)
+                                if emb_clean.startswith("\\x"):
+                                    # Remove \x prefix, convert hex string to bytes
+                                    hex_str = emb_clean[2:]  # skip \x
+                                    emb_bytes = bytes.fromhex(hex_str)
+                                    print(f"Postgres hex dump → {len(emb_bytes)} bytes")
+
+                                else:
+                                    # Assume base64, clean + pad
+                                    emb_clean = emb_clean.replace("\n", "").replace("\r", "").replace(" ", "")
+                                    padding = (4 - len(emb_clean) % 4) % 4
+                                    emb_clean += "=" * padding
+                                    emb_bytes = base64.b64decode(emb_clean, validate=False)
+                                    print(f"Base64 decoded → {len(emb_bytes)} bytes")
+
+                            else:
+                                print(f"Unknown type → skipping")
+                                continue
+
+                            # Convert to numpy float32
+                            emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
+                            actual = len(emb_array)
+                            print(f"Array shape: {actual} floats")
+
+                            # Accept wide range for now (your current is 683, but admin now saves 512)
+                            if 400 <= actual <= 800:
+                                face_db[code] = emb_array
+                                count += 1
+                                print(f"→ ACCEPTED {code} ({actual} floats)")
+                            else:
+                                print(f"→ REJECTED {code}: {actual} floats (out of range)")
+
                         except Exception as e:
-                            print(f"Strict decode failed: {e} → trying validate=False")
-                            emb_bytes = base64.b64decode(emb_clean, validate=False)
-                            print(f"Non-strict decode → {len(emb_bytes)} bytes")
-
-                    else:
-                        print(f"Unknown type → skipping")
-                        continue
-
-                    emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
-                    actual = len(emb_array)
-                    print(f"Converted to array: {actual} floats")
-
-                    # Accept wide range (your current is 683)
-                    if 400 <= actual <= 800:
-                        face_db[code] = emb_array
-                        count += 1
-                        print(f"→ ACCEPTED {code} ({actual} floats)")
-                    else:
-                        print(f"→ REJECTED {code}: {actual} floats (out of range)")
-
-                except Exception as e:
-                    print(f"→ FAILED {code}: {str(e)}")
-
+                            print(f"→ FAILED {code}: {str(e)}")
+                            continue
         last_sync_time = datetime.datetime.now()
         print(f"\nFinal: {len(employee_info)} employees, {count} embeddings loaded")
         if count == 0 and len(employee_info) > 0:
