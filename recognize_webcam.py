@@ -420,7 +420,7 @@ def run_attendance_recognition():
     last_results = []
     prev_time = time.time()
 
-    print("Started → Face = Check-in | Face + ✌️ hold ~3s = Check-out")
+    print("Started ")
 
     while True:
         ret, frame = cap.read()
@@ -480,8 +480,8 @@ def run_attendance_recognition():
                             best_score = sc
                             best_code = code
 
-                    info = employee_info.get(best_code, {"full_name": best_code, "department": ""})
-                    display_name = f"{info['full_name']} ({info['department']})" if info['department'] else info['full_name']
+                    info = employee_info.get(best_code, {"full_name": best_code})
+                    display_name = f"{info['full_name']} " if info['department'] else info['full_name']
                     bbox = face.bbox.astype(int)
                     results.append((bbox, display_name, best_score, face.det_score, best_code))
 
@@ -553,7 +553,7 @@ def run_attendance_recognition():
                     cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 180), 3)
 
         cv2.putText(display_frame,
-                    "Face = Check-in | Face + ✌️ (hold ~3s) = Check-out | ESC to close",
+                    "Started",
                     (25, display_frame.shape[0]-30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.82, (220,220,255), 2)
 
