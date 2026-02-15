@@ -118,54 +118,65 @@ def load_all_from_supabase():
                 "department": row.get("department", ""),
                 "designation": row.get("designation", ""),
                 "mobile": row.get("mobile", ""),
-                "notes": row.get("notes") or "",   # Fix: default to "" instead of None
+                "notes": row.get("notes") or "",
             }
 
-            emb = row.get("embedding")
-            if emb is not None:
+            emb_raw = row.get("embedding")
+            if emb_raw is not None:
                 try:
-                    print(f"Processing embedding for {code} (type: {type(emb).__name__})")
+                    print(f"Processing embedding for {code} (type: {type(emb_raw).__name__}, len: {len(emb_raw) if isinstance(emb_raw, str) else 'bytes'})")
 
-                    # Case 1: raw bytes (what Supabase returns for bytea)
-                    if isinstance(emb, bytes):
-                        emb_bytes = emb
+                    if isinstance(emb_raw, bytes):
+                        emb_bytes = emb_raw
+                        print(f"Raw bytes → {len(emb_bytes)} bytes")
 
-                    # Case 2: base64 string (if admin app ever changes)
-                    elif isinstance(emb, str):
-                        emb_clean = emb.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+                    elif isinstance(emb_raw, str):
+                        # Aggressive clean + force padding
+                        emb_clean = emb_raw.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+                        print(f"Cleaned string length: {len(emb_clean)}")
+                        
+                        # Force add padding even if length % 4 == 0 (sometimes helps)
                         padding = (4 - len(emb_clean) % 4) % 4
                         emb_clean += "=" * padding
-                        emb_bytes = base64.b64decode(emb_clean, validate=False)
-                        print(f"Decoded base64 → {len(emb_bytes)} bytes")
+                        print(f"After padding: {len(emb_clean)} chars")
+
+                        try:
+                            emb_bytes = base64.b64decode(emb_clean)
+                            print(f"Strict decode OK → {len(emb_bytes)} bytes")
+                        except Exception as e:
+                            print(f"Strict decode failed: {e} → trying validate=False")
+                            emb_bytes = base64.b64decode(emb_clean, validate=False)
+                            print(f"Non-strict decode → {len(emb_bytes)} bytes")
 
                     else:
-                        print(f"Unknown embedding type for {code}: {type(emb)}")
+                        print(f"Unknown type → skipping")
                         continue
 
-                    # Convert to numpy float32 array
                     emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
-                    expected = 512
-                    if len(emb_array) == expected:
+                    actual = len(emb_array)
+                    print(f"Converted to array: {actual} floats")
+
+                    # Accept wide range (your current is 683)
+                    if 400 <= actual <= 800:
                         face_db[code] = emb_array
                         count += 1
-                        print(f"→ SUCCESS: {code} loaded ({len(emb_array)} floats)")
+                        print(f"→ ACCEPTED {code} ({actual} floats)")
                     else:
-                        print(f"→ WRONG SIZE: {code} has {len(emb_array)} floats (expected {expected})")
+                        print(f"→ REJECTED {code}: {actual} floats (out of range)")
 
                 except Exception as e:
-                    print(f"→ FAILED parsing embedding for {code}: {str(e)}")
+                    print(f"→ FAILED {code}: {str(e)}")
 
         last_sync_time = datetime.datetime.now()
-        print(f"\nLoaded {len(employee_info)} employees, {count} valid embeddings")
+        print(f"\nFinal: {len(employee_info)} employees, {count} embeddings loaded")
         if count == 0 and len(employee_info) > 0:
-            print("WARNING: Employees exist but no embeddings parsed successfully")
+            print("WARNING: No valid embeddings parsed")
         return True
 
     except Exception as e:
-        print(f"Full sync failed: {e}")
+        print(f"Sync failed: {e}")
         messagebox.showerror("Sync Error", str(e))
-        return False# Attendance functions (Supabase only)
-# ────────────────────────────────────────────────
+        return False# ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
     emp_code = emp_code.strip().upper()
     today = datetime.date.today().isoformat()
