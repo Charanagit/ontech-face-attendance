@@ -191,9 +191,6 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
             emb_stack = np.array(embeddings)  # (3, 512)
             mean_emb = np.mean(emb_stack, axis=0)
             mean_emb_norm = normalize(mean_emb)
-            print(f"Mean emb norm (after normalize): {np.linalg.norm(mean_emb_norm):.6f}")
-            print(f"Mean emb first 5: {mean_emb_norm[:5]}")
-            print(f"Bytes length before base64: {len(embedding_to_save)}")
             
             if mean_emb_norm.shape == (512,):
                 embedding_to_save = mean_emb_norm.tobytes()
