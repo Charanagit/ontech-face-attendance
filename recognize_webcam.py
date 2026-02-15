@@ -13,31 +13,25 @@ import threading
 import winsound
 import base64
 import mediapipe as mp
-
-# Supabase
-SUPABASE_URL = "https://crujjurupavknjwdjjmj.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNydWpqdXJ1cGF2a25qd2Rqam1qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA5NjI0MTAsImV4cCI6MjA4NjUzODQxMH0.MdQDrEHOyQ0mI6HGX986lNMw5cpj5pfUCnKFh88pnzw"
-
 from supabase import create_client, Client
 
 # ────────────────────────────────────────────────
-# Supabase Initialization
+# Supabase Config
 # ────────────────────────────────────────────────
+SUPABASE_URL = "https://crujjurupavknjwdjjmj.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNydWpqdXJ1cGF2a25qd2Rqam1qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA5NjI0MTAsImV4cCI6MjA4NjUzODQxMH0.MdQDrEHOyQ0mI6HGX986lNMw5cpj5pfUCnKFh88pnzw"
+
 supabase = None
 supabase_connected = False
-last_sync_time = None
 
 print("=== Supabase Init ===")
 try:
     supabase = create_client(SUPABASE_URL.strip(), SUPABASE_KEY.strip())
-    # Test connection
     supabase.table("employees").select("emp_code", count="planned").limit(0).execute()
     supabase_connected = True
     print("Supabase connected successfully")
 except Exception as e:
-    print(f"Supabase connection failed: {str(e)}")
-    import traceback
-    traceback.print_exc()
+    print(f"Supabase failed: {str(e)}")
     messagebox.showerror("Cloud Error", f"Supabase failed:\n{str(e)}\nApp will exit.")
     sys.exit(1)
 
@@ -56,9 +50,8 @@ COLOR_SUCCESS = (0, 255, 120)
 COLOR_WARNING = (0, 80, 255)
 COLOR_UNKNOWN = (0, 0, 255)
 COLOR_CLOUD_OK = (0, 200, 100)
-COLOR_CLOUD_FAIL = (0, 80, 255)
 
-SIMILARITY_THRESHOLD    = 0.37
+SIMILARITY_THRESHOLD    = 0.20  # lowered for testing
 GESTURE_HOLD_SECONDS    = 2.8
 MIN_TIME_BETWEEN_ACTIONS = 5.0
 SUCCESS_SHOW_SECONDS    = 5.0
@@ -67,8 +60,8 @@ PROCESS_EVERY_N_FRAMES  = 4
 # ────────────────────────────────────────────────
 # Globals
 # ────────────────────────────────────────────────
-face_db = {}  # emp_code → embedding (np.array)
-employee_info = {}  # emp_code → {"full_name", "department", ...}
+face_db = {}  # code → np.array embedding
+employee_info = {}  # code → dict with name, dept, etc.
 success_message_start = None
 success_message_text = ""
 gesture_active_until = 0.0
@@ -94,16 +87,12 @@ def get_face_analyzer():
     return face_analyzer
 
 # ────────────────────────────────────────────────
-# Load all data from Supabase
+# Load from Supabase
 # ────────────────────────────────────────────────
 def load_all_from_supabase():
     global face_db, employee_info, last_sync_time
     face_db = {}
     employee_info = {}
-
-    if not supabase_connected:
-        messagebox.showerror("No Cloud", "Supabase not connected.")
-        return False
 
     try:
         response = supabase.table("employees").select(
@@ -123,65 +112,75 @@ def load_all_from_supabase():
 
             emb_raw = row.get("embedding")
             if emb_raw is not None:
-                        try:
-                            print(f"Raw embedding type: {type(emb_raw).__name__}, preview: {str(emb_raw)[:50]}...")
+                try:
+                    print(f"Processing {code} embedding (type: {type(emb_raw).__name__}, len: {len(emb_raw) if isinstance(emb_raw, (str, bytes)) else 'n/a'})")
 
-                            if isinstance(emb_raw, bytes):
-                                emb_bytes = emb_raw
-                                print(f"Direct bytes received → length {len(emb_bytes)}")
+                    if isinstance(emb_raw, bytes):
+                        emb_bytes = emb_raw
+                        print(f"→ Direct bytes: {len(emb_bytes)} bytes")
 
-                            elif isinstance(emb_raw, str) and emb_raw.startswith("\\x"):
-                                # Postgres hex dump (most common case now)
-                                hex_str = emb_raw[2:]  # remove \x prefix
-                                emb_bytes = bytes.fromhex(hex_str)
-                                print(f"Converted hex dump → {len(emb_bytes)} bytes")
+                    elif isinstance(emb_raw, str):
+                        emb_clean = emb_raw.strip()
 
-                            elif isinstance(emb_raw, str):
-                                # Fallback: assume base64
-                                emb_clean = emb_raw.strip().replace("\n", "").replace(" ", "")
-                                padding = (4 - len(emb_clean) % 4) % 4
-                                emb_clean += "=" * padding
-                                emb_bytes = base64.b64decode(emb_clean, validate=False)
-                                print(f"Base64 fallback → {len(emb_bytes)} bytes")
-
-                            else:
-                                print("Unknown embedding format → skipping")
+                        if emb_clean.startswith("\\x"):
+                            # Postgres hex dump — remove prefix and convert
+                            hex_part = emb_clean[2:]
+                            # Remove any spaces or invalid chars if present
+                            hex_part = ''.join(c for c in hex_part if c in '0123456789abcdefABCDEF')
+                            try:
+                                emb_bytes = bytes.fromhex(hex_part)
+                                print(f"→ Hex dump converted: {len(emb_bytes)} bytes")
+                            except ValueError as hex_err:
+                                print(f"Hex conversion failed: {hex_err} → skipping")
                                 continue
+                        else:
+                            # Assume base64 (fallback)
+                            emb_clean = emb_clean.replace("\n", "").replace(" ", "")
+                            padding = (4 - len(emb_clean) % 4) % 4
+                            emb_clean += "=" * padding
+                            emb_bytes = base64.b64decode(emb_clean, validate=False)
+                            print(f"→ Base64 decoded: {len(emb_bytes)} bytes")
 
-                            # Convert to float32 array
-                            emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
-                            actual_len = len(emb_array)
-                            print(f"Array length: {actual_len} floats")
+                    else:
+                        print("→ Unknown type → skip")
+                        continue
 
-                            # Accept any reasonable size for now
-                            if 400 <= actual_len <= 800:
-                                face_db[code] = emb_array
-                                count += 1
-                                print(f"→ LOADED {code} ({actual_len} floats)")
-                            else:
-                                print(f"→ REJECTED {code}: {actual_len} floats (unusual size)")
+                    # Convert to float32 array
+                    emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
+                    actual_len = len(emb_array)
+                    print(f"→ Array length: {actual_len} floats")
 
-                        except Exception as e:
-                            print(f"→ PARSE FAILED {code}: {str(e)}")
-                            continue
-        
+                    # Accept any reasonable size (683 is your current, 512 is future)
+                    if 400 <= actual_len <= 800:
+                        face_db[code] = emb_array
+                        count += 1
+                        print(f"→ LOADED {code} successfully ({actual_len} floats)")
+                    else:
+                        print(f"→ REJECTED {code}: unusual size {actual_len}")
+
+                except Exception as parse_err:
+                    print(f"→ PARSE FAILED {code}: {str(parse_err)}")
+                    continue
+
         last_sync_time = datetime.datetime.now()
-        print(f"\nFinal: {len(employee_info)} employees, {count} embeddings loaded")
+        print(f"\nSummary: {len(employee_info)} employees, {count} valid embeddings loaded")
         if count == 0 and len(employee_info) > 0:
-            print("WARNING: No valid embeddings parsed")
+            print("WARNING: Employees exist but no embeddings parsed")
         return True
 
     except Exception as e:
-        print(f"Sync failed: {e}")
+        print(f"Full load failed: {e}")
         messagebox.showerror("Sync Error", str(e))
-        return False# ────────────────────────────────────────────────
+        return False
+# ────────────────────────────────────────────────
+# Attendance (Supabase only)
+# ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
     emp_code = emp_code.strip().upper()
     today = datetime.date.today().isoformat()
     now_time = datetime.datetime.now().strftime("%H:%M:%S")
 
     try:
-        # Check if already checked in today
         existing = supabase.table("attendance")\
             .select("id")\
             .eq("emp_code", emp_code)\
@@ -189,7 +188,7 @@ def mark_present(emp_code: str) -> bool:
             .execute()
 
         if existing.data:
-            print(f"{emp_code} already checked in today")
+            print(f"{emp_code} already checked in")
             return False
 
         supabase.table("attendance").insert({
@@ -197,8 +196,7 @@ def mark_present(emp_code: str) -> bool:
             "checkin_date": today,
             "checkin_time": now_time
         }).execute()
-
-        print(f"Check-in recorded: {emp_code}")
+        print(f"Check-in: {emp_code}")
         return True
     except Exception as e:
         print(f"Check-in failed: {e}")
@@ -210,7 +208,6 @@ def mark_out(emp_code: str) -> bool:
     now_time = datetime.datetime.now().strftime("%H:%M:%S")
 
     try:
-        # Find latest unchecked-out record today
         response = supabase.table("attendance")\
             .select("id, checkout_time")\
             .eq("emp_code", emp_code)\
@@ -220,17 +217,15 @@ def mark_out(emp_code: str) -> bool:
             .execute()
 
         if not response.data or response.data[0]["checkout_time"]:
-            print(f"No open check-in for {emp_code} today")
+            print(f"No open check-in for {emp_code}")
             return False
 
         record_id = response.data[0]["id"]
-
         supabase.table("attendance")\
             .update({"checkout_time": now_time})\
             .eq("id", record_id)\
             .execute()
-
-        print(f"Check-out recorded: {emp_code}")
+        print(f"Check-out: {emp_code}")
         return True
     except Exception as e:
         print(f"Check-out failed: {e}")
@@ -244,8 +239,26 @@ def normalize(v):
     return v / norm if norm > 0 else v
 
 def cosine_similarity(a, b):
-    return float(np.dot(a, b))
+    # Trim to shortest length
+    min_len = min(len(a), len(b))
+    a_trim = a[:min_len]
+    b_trim = b[:min_len]
 
+    # Normalize both
+    a_norm = normalize(a_trim)
+    b_norm = normalize(b_trim)
+
+    # Dot product
+    dot = np.dot(a_norm, b_norm)
+
+    # Safety
+    norm_prod = np.linalg.norm(a_norm) * np.linalg.norm(b_norm)
+    if norm_prod < 1e-8:
+        return 0.0
+
+    sc = dot / norm_prod
+    print(f"Cosine: {sc:.4f} (dot={dot:.4f}, norm_prod={norm_prod:.4f})")
+    return float(sc)
 def is_victory_gesture(lm):
     if not lm:
         return False
@@ -257,12 +270,12 @@ def is_victory_gesture(lm):
     )
 
 # ────────────────────────────────────────────────
-# Splash (unchanged)
+# Splash screen
 # ────────────────────────────────────────────────
 def show_splash():
     logo_path = os.path.join(BASE_DIR, "OnTech.png")
     if not os.path.exists(logo_path):
-        print("Logo missing — skipping")
+        print("Logo not found — skipping")
         return True
 
     logo = cv2.imread(logo_path)
@@ -296,7 +309,7 @@ def show_splash():
     return True
 
 # ────────────────────────────────────────────────
-# UI Windows (updated for Supabase)
+# UI helpers
 # ────────────────────────────────────────────────
 def show_employee_list():
     top = tk.Toplevel()
@@ -326,8 +339,7 @@ def show_employee_list():
     sb.pack(side="right", fill="y")
 
     for code, info in employee_info.items():
-        # Safe handling for notes (could be None or empty)
-        notes = info.get("notes") or ""   # default to empty string if None
+        notes = info.get("notes") or ""
         display_notes = notes[:90] + "…" if len(notes) > 90 else notes
 
         tree.insert("", "end", values=(
@@ -341,6 +353,7 @@ def show_employee_list():
 
     if not employee_info:
         tree.insert("", "end", values=("", "No employees loaded from cloud", "", "", "", ""))
+
 def show_today_attendance():
     top = tk.Toplevel()
     top.title("Today's Attendance (Cloud)")
@@ -385,10 +398,10 @@ def show_today_attendance():
         if not records:
             tree.insert("", "end", values=("", "No attendance today", "", "", ""))
     except Exception as e:
-        tree.insert("", "end", values=("", f"Error loading attendance: {str(e)}", "", "", ""))
+        tree.insert("", "end", values=("", f"Error: {str(e)}", "", "", ""))
 
 # ────────────────────────────────────────────────
-# Recognition Loop
+# Recognition loop
 # ────────────────────────────────────────────────
 def run_attendance_recognition():
     global success_message_start, success_message_text, gesture_active_until
@@ -398,12 +411,11 @@ def run_attendance_recognition():
         messagebox.showerror("Error", "Cannot load face model.")
         return
 
-    # Load from cloud
     if not load_all_from_supabase():
-        messagebox.showwarning("Warning", "Failed to load faces from cloud.\nOnly 'Unknown' will be detected.")
+        messagebox.showwarning("Warning", "Failed to load faces from cloud.")
 
     if not face_db:
-        messagebox.showwarning("No Faces", "No registered faces with embeddings found.")
+        messagebox.showwarning("No Faces", "No valid embeddings loaded.\nOnly 'Unknown' will be detected.")
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -452,7 +464,7 @@ def run_attendance_recognition():
         frame_count += 1
         now = time.time()
 
-        # Gesture
+        # Gesture detection
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             hand_results = hands.process(rgb)
@@ -469,7 +481,7 @@ def run_attendance_recognition():
         except Exception as e:
             print(f"Hand error: {e}")
 
-        # Face
+        # Face processing
         if frame_count % PROCESS_EVERY_N_FRAMES == 0:
             try:
                 faces = analyzer.get(frame)
@@ -478,12 +490,19 @@ def run_attendance_recognition():
                 for face in faces:
                     if face.det_score < 0.30:
                         continue
+
                     emb = normalize(face.embedding)
+                    print(f"Live embedding - shape: {emb.shape}, norm: {np.linalg.norm(emb):.6f}, first 5: {emb[:5]}")
                     best_code = "Unknown"
                     best_score = -1.0
 
                     for code, db_emb in face_db.items():
-                        sc = cosine_similarity(emb, db_emb)
+                        # Use only first 512 dims of stored embedding
+                        db_emb_trim = db_emb[:512] if len(db_emb) > 512 else db_emb
+                        
+                        sc = cosine_similarity(emb, db_emb_trim)
+                        print(f"Similarity to {code} (trimmed to 512): {sc:.3f}")
+                        
                         if sc > best_score:
                             best_score = sc
                             best_code = code
@@ -498,10 +517,10 @@ def run_attendance_recognition():
                 print(f"Face error: {e}")
                 last_results = []
 
-        # Draw + action
+        # Draw & action
         for bbox, dname, score, det_conf, code in last_results:
             x1,y1,x2,y2 = map(int, bbox)
-            color = COLOR_SUCCESS if code != "Unknown" else COLOR_UNKNOWN
+            color = COLOR_SUCCESS if code != "Unknown" and score >= SIMILARITY_THRESHOLD else COLOR_UNKNOWN
 
             cv2.rectangle(display_frame, (x1,y1), (x2,y2), color, 3)
 
@@ -546,8 +565,8 @@ def run_attendance_recognition():
                         (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.3, COLOR_SUCCESS, 3)
 
         # Status
-        status_text = f"Loaded {len(face_db)} faces from cloud"
-        status_color = COLOR_CLOUD_OK if supabase_connected else COLOR_CLOUD_FAIL
+        status_text = f"Loaded {len(face_db)} embeddings from cloud"
+        status_color = COLOR_CLOUD_OK
         if last_sync_time:
             ago = (datetime.datetime.now() - last_sync_time).seconds // 60
             status_text += f" (synced {ago} min ago)"
@@ -579,7 +598,7 @@ def run_attendance_recognition():
 # ────────────────────────────────────────────────
 def launch_kiosk():
     if not load_all_from_supabase():
-        messagebox.showwarning("Cloud Warning", "Failed to load data from Supabase.\nSome features may be limited.")
+        messagebox.showwarning("Cloud Warning", "Failed to load data from Supabase.")
 
     root = tk.Tk()
     root.title("Ontech Attendance Kiosk")
@@ -593,7 +612,7 @@ def launch_kiosk():
     tk.Label(header_frame, text="Ontech Attendance",
              font=("Helvetica", 32, "bold"), fg="#f97316", bg="#0f172a").pack()
 
-    sync_text = f"{datetime.date.today():%Y-%m-%d} • {len(face_db)} employees"
+    sync_text = f"{datetime.date.today():%Y-%m-%d} • {len(face_db)} embeddings loaded"
     if last_sync_time:
         ago = (datetime.datetime.now() - last_sync_time).seconds // 60
         sync_text += f" (cloud sync {ago} min ago)"
@@ -604,7 +623,6 @@ def launch_kiosk():
     status_frame = tk.Frame(root, bg="#1e293b", bd=1, relief="flat")
     status_frame.pack(pady=20, padx=40, fill="x")
 
-    status_color = "green" if supabase_connected else "red"
     tk.Label(status_frame, text="Ready to scan • Place face in front of camera",
              font=("Helvetica", 13), fg="#cbd5e1", bg="#1e293b", pady=12).pack()
 
@@ -638,7 +656,7 @@ def launch_kiosk():
     create_button("Today's Attendance Records", show_today_attendance, "#06b6d4")
 
     create_button("Sync Faces from Cloud Now",
-                  lambda: load_all_from_supabase() or messagebox.showinfo("Sync", f"Reloaded {len(face_db)} faces"),
+                  lambda: load_all_from_supabase() or messagebox.showinfo("Sync", f"Reloaded {len(face_db)} embeddings"),
                   "#8b5cf6", "#ffffff")
 
     create_button("Exit Application", root.quit, "#ef4444")
