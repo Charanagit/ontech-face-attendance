@@ -31,7 +31,7 @@ LIGHT_BLUE   = "#3A3433"
 GREEN_ACCENT = "#2e7d32"
 LIGHT_GREEN  = "#05580C"
 PURPLE_ACCENT = "#7e57c2"
-LIGHT_PURPLE = "#5A1919"
+LIGHT_PURPLE = "#410C0C"
 GRAY_BG      = "#0f1316"
 TEXT_DARK    = "#1a1a2e"
 
@@ -243,6 +243,24 @@ if page == "Main Dashboard (Overview)":
             })
 
         df = pd.DataFrame(employees_data)
+
+        # Optional: color the embedding column
+        def highlight_embedding(row):
+            if row["Has Embedding"].startswith("Yes"):
+                return ['background-color: #05580C'] * len(row)  # light green
+            else:
+                return ['background-color: #410C0C'] * len(row)  # light red
+
+        styled_df = df.style.apply(highlight_embedding, axis=1)
+
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Has Embedding": st.column_config.TextColumn("Has Embedding", width="medium")
+            }
+        )
 
         if st.button("🔄 Refresh table", type="primary"):
             st.rerun()
