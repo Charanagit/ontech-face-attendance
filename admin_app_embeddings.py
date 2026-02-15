@@ -260,6 +260,60 @@ page = st.sidebar.radio(
 )
 
 # ────────────────────────────────────────────────
+# Attendance functions (Supabase)
+# ────────────────────────────────────────────────
+def get_today_attendance():
+    today = datetime.date.today().isoformat()
+    try:
+        response = supabase.table("attendance")\
+            .select("emp_code, checkin_time, checkout_time")\
+            .eq("checkin_date", today)\
+            .order("checkin_time", desc=True)\
+            .execute()
+        
+        records = []
+        for r in response.data:
+            code = r["emp_code"]
+            # Get name/dept from employees cache or query
+            emp_resp = supabase.table("employees").select("full_name, department").eq("emp_code", code).execute()
+            name = emp_resp.data[0]["full_name"] if emp_resp.data else code
+            dept = emp_resp.data[0]["department"] if emp_resp.data else ""
+            
+            records.append({
+                "emp_code": code,
+                "name": name,
+                "department": dept,
+                "checkin_time": r["checkin_time"] or "-",
+                "checkout_time": r["checkout_time"] or "-"
+            })
+        return records
+    except Exception as e:
+        st.error(f"Failed to load today's attendance: {e}")
+        return []
+
+def get_employee_history(emp_code):
+    try:
+        response = supabase.table("attendance")\
+            .select("checkin_date, checkin_time, checkout_time")\
+            .eq("emp_code", emp_code)\
+            .order("checkin_date", desc=True)\
+            .execute()
+        
+        history = []
+        for r in response.data:
+            status = "Checked Out" if r["checkout_time"] else "Present"
+            history.append({
+                "date": r["checkin_date"],
+                "checkin_time": r["checkin_time"] or "-",
+                "checkout_time": r["checkout_time"] or "-",
+                "status": status
+            })
+        return history
+    except Exception as e:
+        st.error(f"Failed to load history for {emp_code}: {e}")
+        return []
+
+# ────────────────────────────────────────────────
 # Main Dashboard (updated for new structure)
 # ────────────────────────────────────────────────
 if page == "Main Dashboard (Overview)":
@@ -342,6 +396,8 @@ if page == "Main Dashboard (Overview)":
                     st.rerun()
     else:
         st.info("No employees registered yet. Add someone below.", icon="ℹ️")
+
+
 
 # ────────────────────────────────────────────────
 # Register / Edit Employee (updated for new structure)
@@ -467,11 +523,58 @@ elif page == "Register / Edit Employee":
 # ────────────────────────────────────────────────
 elif page == "Today's Attendance":
     st.subheader("Today's Attendance")
-    st.info("Coming soon — attendance will be from Supabase.")
+    
+    records = get_today_attendance()
+    
+    if records:
+        df = pd.DataFrame(records)
+        df["Status"] = df["checkout_time"].apply(lambda x: "Checked Out" if x != "-" else "Present")
+        
+        st.dataframe(
+            df[["emp_code", "name", "department", "checkin_time", "checkout_time", "Status"]],
+            use_container_width=True,
+            hide_index=True
+        )
+        st.success(f"Total present today: {len(records)} employees")
+    else:
+        st.info("No attendance records today yet.", icon="ℹ️")
+
+    if st.button("🔄 Refresh Today's Attendance"):
+        st.rerun()
 
 elif page == "Employee Attendance History":
     st.subheader("Employee Attendance History")
-    st.info("Coming soon.")
+
+    # Load all employees for dropdown
+    try:
+        emp_list = supabase.table("employees").select("emp_code, full_name").execute().data
+        options = [f"{e['emp_code']} - {e['full_name'] or e['emp_code']}" for e in emp_list]
+        emp_dict = {opt: opt.split(" - ")[0] for opt in options}
+    except Exception as e:
+        st.error(f"Failed to load employees: {e}")
+        options = []
+
+    selected = st.selectbox("Select Employee", [""] + options)
+
+    if selected and selected != "":
+        code = emp_dict[selected]
+        history = get_employee_history(code)
+
+        if history:
+            df_hist = pd.DataFrame(history)
+            st.dataframe(
+                df_hist[["date", "checkin_time", "checkout_time", "status"]],
+                use_container_width=True,
+                hide_index=True
+            )
+            st.success(f"Found {len(history)} records for {selected}")
+        else:
+            st.info("No attendance history found for this employee.")
+
+        if st.button("🔄 Refresh History"):
+            st.rerun()
+    else:
+        st.info("Select an employee to view their attendance history.")
 
 elif page == "Daily Attendance Report":
     st.subheader("Daily Attendance Report")
