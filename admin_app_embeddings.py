@@ -217,10 +217,17 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
 
             # FIXED: Base64-encode embedding to avoid "bytes not JSON serializable"
             if embedding_to_save:
+                # Save to separate embeddings table
                 b64_encoded = base64.b64encode(embedding_to_save).decode('utf-8')
-                data["embedding"] = b64_encoded
-                messages.append(f"Embedding base64-encoded: {len(b64_encoded)} chars")
-
+                try:
+                    supabase.table("face_embeddings").upsert({
+                        "emp_code": emp_code,
+                        "embedding_base64": b64_encoded
+                    }, on_conflict="emp_code").execute()
+                    messages.append(f"Embedding saved to face_embeddings table (base64, {len(b64_encoded)} chars)")
+                except Exception as e:
+                    messages.append(f"Embedding table save failed: {str(e)}")
+                    st.warning(f"Embedding save failed: {str(e)}")
             response = supabase.table("employees").upsert(
                 data,
                 on_conflict="emp_code"

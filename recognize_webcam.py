@@ -95,12 +95,12 @@ def load_all_from_supabase():
     employee_info = {}
 
     try:
-        response = supabase.table("employees").select(
-            "emp_code, full_name, department, designation, mobile, notes, embedding"
+        # Load employee metadata
+        emp_response = supabase.table("employees").select(
+            "emp_code, full_name, department, designation, mobile, notes"
         ).execute()
 
-        count = 0
-        for row in response.data:
+        for row in emp_response.data:
             code = row["emp_code"]
             employee_info[code] = {
                 "full_name": row.get("full_name", code),
@@ -110,69 +110,37 @@ def load_all_from_supabase():
                 "notes": row.get("notes") or "",
             }
 
-            emb_raw = row.get("embedding")
-            if emb_raw is not None:
+        # Load embeddings from separate table
+        emb_response = supabase.table("face_embeddings").select("emp_code, embedding_base64").execute()
+
+        count = 0
+        for row in emb_response.data:
+            code = row["emp_code"]
+            b64_str = row.get("embedding_base64")
+            if b64_str:
                 try:
-                    print(f"Processing {code} embedding (type: {type(emb_raw).__name__}, len: {len(emb_raw) if isinstance(emb_raw, (str, bytes)) else 'n/a'})")
-
-                    if isinstance(emb_raw, bytes):
-                        emb_bytes = emb_raw
-                        print(f"→ Direct bytes: {len(emb_bytes)} bytes")
-
-                    elif isinstance(emb_raw, str):
-                        emb_clean = emb_raw.strip()
-
-                        if emb_clean.startswith("\\x"):
-                            # Postgres hex dump — remove prefix and convert
-                            hex_part = emb_clean[2:]
-                            # Remove any spaces or invalid chars if present
-                            hex_part = ''.join(c for c in hex_part if c in '0123456789abcdefABCDEF')
-                            try:
-                                emb_bytes = bytes.fromhex(hex_part)
-                                print(f"→ Hex dump converted: {len(emb_bytes)} bytes")
-                            except ValueError as hex_err:
-                                print(f"Hex conversion failed: {hex_err} → skipping")
-                                continue
-                        else:
-                            # Assume base64 (fallback)
-                            emb_clean = emb_clean.replace("\n", "").replace(" ", "")
-                            padding = (4 - len(emb_clean) % 4) % 4
-                            emb_clean += "=" * padding
-                            emb_bytes = base64.b64decode(emb_clean, validate=False)
-                            print(f"→ Base64 decoded: {len(emb_bytes)} bytes")
-
-                    else:
-                        print("→ Unknown type → skip")
-                        continue
-
-                    # Convert to float32 array
+                    emb_bytes = base64.b64decode(b64_str)
                     emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
                     actual_len = len(emb_array)
-                    print(f"→ Array length: {actual_len} floats")
 
-                    # Accept any reasonable size (683 is your current, 512 is future)
-                    if 400 <= actual_len <= 800:
+                    print(f"Loaded embedding for {code}: {actual_len} floats")
+
+                    if actual_len == 512:  # enforce correct size now
                         face_db[code] = emb_array
                         count += 1
-                        print(f"→ LOADED {code} successfully ({actual_len} floats)")
                     else:
-                        print(f"→ REJECTED {code}: unusual size {actual_len}")
-
-                except Exception as parse_err:
-                    print(f"→ PARSE FAILED {code}: {str(parse_err)}")
-                    continue
+                        print(f"→ REJECTED {code}: wrong size {actual_len} (expected 512)")
+                except Exception as e:
+                    print(f"→ FAILED decoding embedding for {code}: {str(e)}")
 
         last_sync_time = datetime.datetime.now()
-        print(f"\nSummary: {len(employee_info)} employees, {count} valid embeddings loaded")
-        if count == 0 and len(employee_info) > 0:
-            print("WARNING: Employees exist but no embeddings parsed")
+        print(f"\nLoaded {len(employee_info)} employees, {count} valid 512-dim embeddings")
         return True
 
     except Exception as e:
-        print(f"Full load failed: {e}")
+        print(f"Load failed: {e}")
         messagebox.showerror("Sync Error", str(e))
-        return False
-# ────────────────────────────────────────────────
+        return False# ────────────────────────────────────────────────
 # Attendance (Supabase only)
 # ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
