@@ -1,4 +1,3 @@
-# recognize_webcam.py
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -12,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import winsound
-
+import base64
 import mediapipe as mp
 
 # Supabase
@@ -21,57 +20,26 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 
 from supabase import create_client, Client
 
-supabase: Client = None
+# ────────────────────────────────────────────────
+# Supabase Initialization
+# ────────────────────────────────────────────────
+supabase = None
 supabase_connected = False
+last_sync_time = None
 
-print("=== Supabase Debug Start ===")
-print(f"URL: '{SUPABASE_URL}'")   # check for extra spaces/quotes
-print(f"Key (first 20 chars): {SUPABASE_KEY[:20]}... (length: {len(SUPABASE_KEY)})")
-print("Creating client...")
-
+print("=== Supabase Init ===")
 try:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("create_client returned type:", type(supabase))
-    if supabase is None:
-        raise RuntimeError("create_client returned None - check URL/key format or network")
-    
-    # Minimal ping - just get table metadata
-    ping = supabase.table("employees").select("emp_code", count="planned").limit(0).execute()
-    print("Ping OK - table reachable")
+    supabase = create_client(SUPABASE_URL.strip(), SUPABASE_KEY.strip())
+    # Test connection
+    supabase.table("employees").select("emp_code", count="planned").limit(0).execute()
     supabase_connected = True
-
+    print("Supabase connected successfully")
 except Exception as e:
-    print("Supabase init/ping failed:", str(e))
+    print(f"Supabase connection failed: {str(e)}")
     import traceback
     traceback.print_exc()
-    messagebox.showwarning("Cloud Issue", f"Supabase failed:\n{str(e)}\n\nContinuing local only.")
-    supabase = None
-    supabase_connected = False
-
-print("=== Supabase Debug End ===")
-
-from database import (
-    init_db,
-    load_employee_info,
-    load_all_embeddings as local_load_embeddings,
-    mark_present as local_mark_present,
-    mark_out as local_mark_out,
-    is_present_today,
-    get_today_present,
-    get_all_employees,
-    load_all_employees,
-)
-
-def sync_from_cloud():
-    global face_db
-    if supabase_connected:
-        try:
-            face_db = load_all_embeddings()  # your Supabase version
-            messagebox.showinfo("Sync Complete", f"Loaded {len(face_db)} faces from cloud")
-        except Exception as e:
-            messagebox.showerror("Sync Failed", str(e))
-    else:
-        messagebox.showwarning("No Cloud", "Cannot sync - no connection")
+    messagebox.showerror("Cloud Error", f"Supabase failed:\n{str(e)}\nApp will exit.")
+    sys.exit(1)
 
 # ────────────────────────────────────────────────
 # Paths & Config
@@ -84,14 +52,12 @@ else:
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-DB_PATH = os.path.join(DATA_DIR, "employees.db")
-
 COLOR_SUCCESS = (0, 255, 120)
 COLOR_WARNING = (0, 80, 255)
 COLOR_UNKNOWN = (0, 0, 255)
-COLOR_CLOUD    = (0, 200, 255)   # cyan for cloud status
+COLOR_CLOUD_OK = (0, 200, 100)
+COLOR_CLOUD_FAIL = (0, 80, 255)
 
-# Tunable parameters
 SIMILARITY_THRESHOLD    = 0.37
 GESTURE_HOLD_SECONDS    = 2.8
 MIN_TIME_BETWEEN_ACTIONS = 5.0
@@ -101,7 +67,8 @@ PROCESS_EVERY_N_FRAMES  = 4
 # ────────────────────────────────────────────────
 # Globals
 # ────────────────────────────────────────────────
-face_db = {}
+face_db = {}  # emp_code → embedding (np.array)
+employee_info = {}  # emp_code → {"full_name", "department", ...}
 success_message_start = None
 success_message_text = ""
 gesture_active_until = 0.0
@@ -122,115 +89,145 @@ def get_face_analyzer():
             face_analyzer.prepare(ctx_id=0, det_size=(320, 320), det_thresh=0.32)
             print("InsightFace ready")
         except Exception as e:
-            print(f"InsightFace init failed: {e}")
+            print(f"InsightFace failed: {e}")
             face_analyzer = None
     return face_analyzer
 
 # ────────────────────────────────────────────────
-# Supabase + Local Hybrid Functions
+# Load all data from Supabase
 # ────────────────────────────────────────────────
+def load_all_from_supabase():
+    global face_db, employee_info, last_sync_time
+    face_db = {}
+    employee_info = {}
 
-def load_all_embeddings():
-    global face_db
-    if supabase_connected:
-        try:
-            response = supabase.table("employees").select("emp_code, embedding").execute()
-            face_db = {}
-            for row in response.data:
-                if row.get("embedding"):
-                    try:
-                        emb = np.frombuffer(row["embedding"], dtype=np.float32)
-                        face_db[row["emp_code"]] = emb
-                    except Exception as e:
-                        print(f"Bad embedding for {row['emp_code']}: {e}")
-            print(f"Loaded {len(face_db)} embeddings from Supabase")
-            return face_db
-        except Exception as e:
-            print(f"Supabase load failed: {e} → falling back to local")
-    
-    # Fallback to local SQLite
-    face_db = local_load_embeddings()
-    print(f"Fallback: loaded {len(face_db)} embeddings from local DB")
-    return face_db
+    if not supabase_connected:
+        messagebox.showerror("No Cloud", "Supabase not connected.")
+        return False
 
+    try:
+        response = supabase.table("employees").select(
+            "emp_code, full_name, department, designation, mobile, notes, embedding"
+        ).execute()
 
+        count = 0
+        for row in response.data:
+            code = row["emp_code"]
+            employee_info[code] = {
+                "full_name": row.get("full_name", code),
+                "department": row.get("department", ""),
+                "designation": row.get("designation", ""),
+                "mobile": row.get("mobile", ""),
+                "notes": row.get("notes", ""),
+            }
+
+            emb = row.get("embedding")
+            if emb:
+                try:
+                    if isinstance(emb, str):
+                        # Clean and fix padding
+                        emb_clean = emb.strip()
+                        # Add missing = padding if needed
+                        padding = (4 - len(emb_clean) % 4) % 4
+                        emb_clean += "=" * padding
+                        
+                        try:
+                            emb_bytes = base64.b64decode(emb_clean)
+                        except Exception as decode_err:
+                            print(f"Base64 decode still failed for {code}: {decode_err}")
+                            # Last resort: try without padding fix
+                            emb_bytes = base64.b64decode(emb_clean, validate=False)
+                    
+                    else:
+                        emb_bytes = emb  # if raw bytes (unlikely)
+
+                    emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
+                    expected_len = 512  # buffalo_s / most InsightFace models
+                    if len(emb_array) == expected_len:
+                        face_db[code] = emb_array
+                        count += 1
+                        print(f"Successfully loaded embedding for {code}")
+                    else:
+                        print(f"Wrong size for {code}: {len(emb_array)} (expected {expected_len})")
+                except Exception as e:
+                    print(f"Embedding parse failed for {code}: {e}")
+
+        last_sync_time = datetime.datetime.now()
+        print(f"Loaded {len(employee_info)} employees, {count} valid embeddings from Supabase")
+        if count == 0 and len(employee_info) > 0:
+            print("Warning: Employees exist but no valid embeddings were parsed")
+        return True
+
+    except Exception as e:
+        print(f"Full load failed: {e}")
+        messagebox.showerror("Sync Error", str(e))
+        return False
+# ────────────────────────────────────────────────
+# Attendance functions (Supabase only)
+# ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
     emp_code = emp_code.strip().upper()
-    now = datetime.datetime.now()
-    today = now.date().isoformat()
-    time_str = now.strftime("%H:%M:%S")
-    
-    success = False
-    
-    if supabase_connected:
-        try:
-            existing = supabase.table("attendance")\
-                .select("id")\
-                .eq("emp_code", emp_code)\
-                .eq("checkin_date", today)\
-                .execute()
-            
-            if existing.data:
-                print(f"{emp_code} already checked in today (cloud)")
-                return False
-            
-            supabase.table("attendance").insert({
-                "emp_code": emp_code,
-                "checkin_date": today,
-                "checkin_time": time_str
-            }).execute()
-            print(f"Cloud check-in: {emp_code}")
-            success = True
-        except Exception as e:
-            print(f"Cloud check-in failed: {e}")
-    
-    # Local fallback or confirmation
-    if local_mark_present(emp_code):
-        print(f"Local check-in recorded: {emp_code}")
-        success = True
-    
-    return success
+    today = datetime.date.today().isoformat()
+    now_time = datetime.datetime.now().strftime("%H:%M:%S")
 
+    try:
+        # Check if already checked in today
+        existing = supabase.table("attendance")\
+            .select("id")\
+            .eq("emp_code", emp_code)\
+            .eq("checkin_date", today)\
+            .execute()
+
+        if existing.data:
+            print(f"{emp_code} already checked in today")
+            return False
+
+        supabase.table("attendance").insert({
+            "emp_code": emp_code,
+            "checkin_date": today,
+            "checkin_time": now_time
+        }).execute()
+
+        print(f"Check-in recorded: {emp_code}")
+        return True
+    except Exception as e:
+        print(f"Check-in failed: {e}")
+        return False
 
 def mark_out(emp_code: str) -> bool:
     emp_code = emp_code.strip().upper()
-    now = datetime.datetime.now()
-    time_str = now.strftime("%H:%M:%S")
-    
-    success = False
-    
-    if supabase_connected:
-        try:
-            response = supabase.table("attendance")\
-                .select("id, checkout_time")\
-                .eq("emp_code", emp_code)\
-                .eq("checkin_date", now.date().isoformat())\
-                .order("id", desc=True)\
-                .limit(1)\
-                .execute()
-            
-            if not response.data or response.data[0].get("checkout_time"):
-                print(f"No valid check-in for checkout (cloud): {emp_code}")
-            else:
-                record_id = response.data[0]["id"]
-                supabase.table("attendance")\
-                    .update({"checkout_time": time_str})\
-                    .eq("id", record_id)\
-                    .execute()
-                print(f"Cloud check-out: {emp_code}")
-                success = True
-        except Exception as e:
-            print(f"Cloud check-out failed: {e}")
-    
-    # Local fallback
-    if local_mark_out(emp_code):
-        print(f"Local check-out recorded: {emp_code}")
-        success = True
-    
-    return success
+    today = datetime.date.today().isoformat()
+    now_time = datetime.datetime.now().strftime("%H:%M:%S")
+
+    try:
+        # Find latest unchecked-out record today
+        response = supabase.table("attendance")\
+            .select("id, checkout_time")\
+            .eq("emp_code", emp_code)\
+            .eq("checkin_date", today)\
+            .order("id", desc=True)\
+            .limit(1)\
+            .execute()
+
+        if not response.data or response.data[0]["checkout_time"]:
+            print(f"No open check-in for {emp_code} today")
+            return False
+
+        record_id = response.data[0]["id"]
+
+        supabase.table("attendance")\
+            .update({"checkout_time": now_time})\
+            .eq("id", record_id)\
+            .execute()
+
+        print(f"Check-out recorded: {emp_code}")
+        return True
+    except Exception as e:
+        print(f"Check-out failed: {e}")
+        return False
 
 # ────────────────────────────────────────────────
-# Utils (unchanged)
+# Utils
 # ────────────────────────────────────────────────
 def normalize(v):
     norm = np.linalg.norm(v)
@@ -250,17 +247,17 @@ def is_victory_gesture(lm):
     )
 
 # ────────────────────────────────────────────────
-# Splash screen (unchanged)
+# Splash (unchanged)
 # ────────────────────────────────────────────────
 def show_splash():
     logo_path = os.path.join(BASE_DIR, "OnTech.png")
     if not os.path.exists(logo_path):
-        print("Logo not found — skipping splash")
+        print("Logo missing — skipping")
         return True
 
     logo = cv2.imread(logo_path)
     if logo is None:
-        print("Failed to load logo")
+        print("Logo load failed")
         return True
 
     h, w = logo.shape[:2]
@@ -289,30 +286,27 @@ def show_splash():
     return True
 
 # ────────────────────────────────────────────────
-# UI helper windows (updated to use load_all_employees)
+# UI Windows (updated for Supabase)
 # ────────────────────────────────────────────────
 def show_employee_list():
     top = tk.Toplevel()
-    top.title("Registered Employees")
+    top.title("Registered Employees (Cloud)")
     top.geometry("1100x700")
-    top.minsize(1000, 600)
 
-    tree = ttk.Treeview(top, columns=("Code","Name","Dept","Desig","Mobile","Notes","Today"), show="headings")
+    tree = ttk.Treeview(top, columns=("Code","Name","Dept","Desig","Mobile","Notes"), show="headings")
     tree.heading("Code", text="Code")
     tree.heading("Name", text="Name")
     tree.heading("Dept", text="Department")
     tree.heading("Desig", text="Designation")
     tree.heading("Mobile", text="Mobile")
     tree.heading("Notes", text="Notes")
-    tree.heading("Today", text="Present Today")
 
     tree.column("Code", width=90, anchor="center")
-    tree.column("Name", width=170)
-    tree.column("Dept", width=130)
-    tree.column("Desig", width=150)
-    tree.column("Mobile", width=110)
-    tree.column("Notes", width=220)
-    tree.column("Today", width=140, anchor="center")
+    tree.column("Name", width=200)
+    tree.column("Dept", width=140)
+    tree.column("Desig", width=160)
+    tree.column("Mobile", width=120)
+    tree.column("Notes", width=250)
 
     tree.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -320,40 +314,36 @@ def show_employee_list():
     tree.configure(yscroll=sb.set)
     sb.pack(side="right", fill="y")
 
-    employees = load_all_employees()
-    if not employees:
-        tree.insert("", "end", values=("", "No employees yet", "", "", "", "", ""))
-        return
+    for code, info in employee_info.items():
+        tree.insert("", "end", values=(
+            code,
+            info["full_name"],
+            info["department"],
+            info["designation"],
+            info["mobile"],
+            info["notes"][:100] + "..." if len(info["notes"]) > 100 else info["notes"]
+        ))
 
-    for emp in employees:
-        code, name, dept, desig, mob, notes = emp
-        pres = is_present_today(code)
-        tag = "present" if pres.startswith("Yes") else "absent"
-        tree.insert("", "end", values=(code, name, dept, desig, mob,
-                                       notes[:90]+"…" if len(notes or "")>90 else (notes or ""),
-                                       pres), tags=(tag,))
-
-    tree.tag_configure("present", foreground="green")
-    tree.tag_configure("absent", foreground="gray")
-
+    if not employee_info:
+        tree.insert("", "end", values=("", "No employees loaded from cloud", "", "", "", ""))
 
 def show_today_attendance():
     top = tk.Toplevel()
-    top.title("Today's Check-ins")
+    top.title("Today's Attendance (Cloud)")
     top.geometry("900x600")
 
     tree = ttk.Treeview(top, columns=("Code","Name","Dept","Check-in","Check-out"), show="headings")
     tree.heading("Code", text="Code")
     tree.heading("Name", text="Name")
     tree.heading("Dept", text="Department")
-    tree.heading("Check-in", text="Check-in Time")
-    tree.heading("Check-out", text="Check-out Time")
+    tree.heading("Check-in", text="Check-in")
+    tree.heading("Check-out", text="Check-out")
 
     tree.column("Code", width=100, anchor="center")
     tree.column("Name", width=220)
     tree.column("Dept", width=180)
-    tree.column("Check-in", width=140, anchor="center")
-    tree.column("Check-out", width=140, anchor="center")
+    tree.column("Check-in", width=140)
+    tree.column("Check-out", width=140)
 
     tree.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -361,18 +351,30 @@ def show_today_attendance():
     tree.configure(yscroll=sb.set)
     sb.pack(side="right", fill="y")
 
-    records = get_today_present()
-    for r in records:
-        tree.insert("", "end", values=(
-            r["emp_code"], r["name"], r["department"],
-            r["checkin_time"], r["checkout_time"] if r["checkout_time"] != "-" else "-"
-        ))
+    try:
+        today = datetime.date.today().isoformat()
+        records = supabase.table("attendance")\
+            .select("emp_code, checkin_time, checkout_time")\
+            .eq("checkin_date", today)\
+            .execute().data
 
-    if not records:
-        tree.insert("", "end", values=("", "No check-ins today", "", "", ""))
+        for r in records:
+            code = r["emp_code"]
+            name = employee_info.get(code, {}).get("full_name", code)
+            dept = employee_info.get(code, {}).get("department", "")
+            tree.insert("", "end", values=(
+                code, name, dept,
+                r["checkin_time"] or "-",
+                r["checkout_time"] or "-"
+            ))
+
+        if not records:
+            tree.insert("", "end", values=("", "No attendance today", "", "", ""))
+    except Exception as e:
+        tree.insert("", "end", values=("", f"Error loading attendance: {str(e)}", "", "", ""))
 
 # ────────────────────────────────────────────────
-# Recognition loop
+# Recognition Loop
 # ────────────────────────────────────────────────
 def run_attendance_recognition():
     global success_message_start, success_message_text, gesture_active_until
@@ -382,18 +384,18 @@ def run_attendance_recognition():
         messagebox.showerror("Error", "Cannot load face model.")
         return
 
-    # Load embeddings (tries cloud first, then local)
-    global face_db
-    face_db = load_all_embeddings()
+    # Load from cloud
+    if not load_all_from_supabase():
+        messagebox.showwarning("Warning", "Failed to load faces from cloud.\nOnly 'Unknown' will be detected.")
 
     if not face_db:
-        messagebox.showwarning("Warning", "No registered faces found.\nOnly 'Unknown' will be detected.")
+        messagebox.showwarning("No Faces", "No registered faces with embeddings found.")
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
         cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        messagebox.showerror("Error", "Cannot open webcam.")
+        messagebox.showerror("Error", "Webcam not found.")
         return
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -412,19 +414,19 @@ def run_attendance_recognition():
         max_num_hands=2,
         model_complexity=0,
         min_detection_confidence=0.52,
-        min_tracking_confidence=0.52,
+        min_tracking_confidence=0.52
     )
 
     frame_count = 0
     last_results = []
     prev_time = time.time()
 
-    print("Recognition started → Face = Check-in | Face + ✌️ (hold ~3s) = Check-out")
+    print("Started → Face = Check-in | Face + ✌️ hold ~3s = Check-out")
 
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("Camera frame lost → recovering...")
+            print("Frame lost → retrying...")
             cap.release()
             cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             if not cap.isOpened():
@@ -436,7 +438,7 @@ def run_attendance_recognition():
         frame_count += 1
         now = time.time()
 
-        # Gesture detection
+        # Gesture
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             hand_results = hands.process(rgb)
@@ -451,9 +453,9 @@ def run_attendance_recognition():
                         gesture_active_until = now + GESTURE_HOLD_SECONDS
                         winsound.Beep(1800, 80)
         except Exception as e:
-            print(f"Hand processing error: {e}")
+            print(f"Hand error: {e}")
 
-        # Face processing
+        # Face
         if frame_count % PROCESS_EVERY_N_FRAMES == 0:
             try:
                 faces = analyzer.get(frame)
@@ -472,28 +474,28 @@ def run_attendance_recognition():
                             best_score = sc
                             best_code = code
 
-                    name, dept, *_ = load_employee_info(best_code)
-                    display_name = f"{name} ({dept})" if dept else name
+                    info = employee_info.get(best_code, {"full_name": best_code, "department": ""})
+                    display_name = f"{info['full_name']} ({info['department']})" if info['department'] else info['full_name']
                     bbox = face.bbox.astype(int)
                     results.append((bbox, display_name, best_score, face.det_score, best_code))
 
                 last_results = results
             except Exception as e:
-                print(f"Face processing error: {e}")
+                print(f"Face error: {e}")
                 last_results = []
 
-        # Draw & action
+        # Draw + action
         for bbox, dname, score, det_conf, code in last_results:
             x1,y1,x2,y2 = map(int, bbox)
-            color = COLOR_SUCCESS if dname != "Unknown" else COLOR_UNKNOWN
+            color = COLOR_SUCCESS if code != "Unknown" else COLOR_UNKNOWN
 
             cv2.rectangle(display_frame, (x1,y1), (x2,y2), color, 3)
 
             label = f"{dname} {score:.3f}"
-            if dname == "Unknown":
-                label += f"  det:{det_conf:.2f}"
+            if code == "Unknown":
+                label += f" det:{det_conf:.2f}"
             else:
-                label += f"  sim:{score:.3f}"
+                label += f" sim:{score:.3f}"
 
             tw = len(label) * 11 + 20
             cv2.rectangle(display_frame, (x1, y1-35), (x1 + tw, y1-5), color, -1)
@@ -504,17 +506,14 @@ def run_attendance_recognition():
                 if code in last_action_time and now - last_action_time[code] < MIN_TIME_BETWEEN_ACTIONS:
                     continue
 
-                is_checkout = (now < gesture_active_until)
-
+                is_checkout = now < gesture_active_until
                 success = False
                 action_text = ""
 
                 if is_checkout:
-                    print(f"CHECK-OUT → {code}")
                     success = mark_out(code)
                     action_text = "CHECKED OUT"
                 else:
-                    print(f"CHECK-IN → {code}")
                     success = mark_present(code)
                     action_text = "CHECKED IN"
 
@@ -526,20 +525,21 @@ def run_attendance_recognition():
                     print(f"SUCCESS: {action_text} {code}")
 
         # Success overlay
-        if success_message_start and (now - success_message_start < SUCCESS_SHOW_SECONDS):
+        if success_message_start and now - success_message_start < SUCCESS_SHOW_SECONDS:
             cv2.putText(display_frame, success_message_text, (140, 160),
                         cv2.FONT_HERSHEY_DUPLEX, 2.2, COLOR_SUCCESS, 6)
             cv2.putText(display_frame, datetime.datetime.now().strftime("%H:%M:%S"),
                         (180, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.3, COLOR_SUCCESS, 3)
 
-        # Status overlays
-        db_status = f"Loaded {len(face_db)} faces"
-        if supabase_connected:
-            db_status += " (cloud)"
-        else:
-            db_status += " (local only)"
-        cv2.putText(display_frame, db_status, (25, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_CLOUD if supabase_connected else COLOR_WARNING, 2)
+        # Status
+        status_text = f"Loaded {len(face_db)} faces from cloud"
+        status_color = COLOR_CLOUD_OK if supabase_connected else COLOR_CLOUD_FAIL
+        if last_sync_time:
+            ago = (datetime.datetime.now() - last_sync_time).seconds // 60
+            status_text += f" (synced {ago} min ago)"
+
+        cv2.putText(display_frame, status_text, (25, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
 
         fps = 1 / (now - prev_time) if now > prev_time else 0
         prev_time = now
@@ -547,7 +547,7 @@ def run_attendance_recognition():
                     cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 180), 3)
 
         cv2.putText(display_frame,
-                    "Face = Check-in    |    Face + ✌️ (hold ~3s) = Check-out    |    ESC to close",
+                    "Face = Check-in | Face + ✌️ (hold ~3s) = Check-out | ESC to close",
                     (25, display_frame.shape[0]-30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.82, (220,220,255), 2)
 
@@ -564,10 +564,8 @@ def run_attendance_recognition():
 # Kiosk Dashboard
 # ────────────────────────────────────────────────
 def launch_kiosk():
-    init_db()
-
-    global face_db
-    face_db = load_all_embeddings()
+    if not load_all_from_supabase():
+        messagebox.showwarning("Cloud Warning", "Failed to load data from Supabase.\nSome features may be limited.")
 
     root = tk.Tk()
     root.title("Ontech Attendance Kiosk")
@@ -581,13 +579,18 @@ def launch_kiosk():
     tk.Label(header_frame, text="Ontech Attendance",
              font=("Helvetica", 32, "bold"), fg="#f97316", bg="#0f172a").pack()
 
-    tk.Label(header_frame,
-             text=f"{datetime.date.today():%Y-%m-%d} • {len(face_db)} employees registered",
+    sync_text = f"{datetime.date.today():%Y-%m-%d} • {len(face_db)} employees"
+    if last_sync_time:
+        ago = (datetime.datetime.now() - last_sync_time).seconds // 60
+        sync_text += f" (cloud sync {ago} min ago)"
+
+    tk.Label(header_frame, text=sync_text,
              font=("Helvetica", 14), fg="#94a3b8", bg="#0f172a").pack(pady=(4, 0))
 
     status_frame = tk.Frame(root, bg="#1e293b", bd=1, relief="flat")
     status_frame.pack(pady=20, padx=40, fill="x")
 
+    status_color = "green" if supabase_connected else "red"
     tk.Label(status_frame, text="Ready to scan • Place face in front of camera",
              font=("Helvetica", 13), fg="#cbd5e1", bg="#1e293b", pady=12).pack()
 
@@ -604,8 +607,6 @@ def launch_kiosk():
         "activebackground": "#334155",
     }
 
-    
-
     def create_button(text, command, bg, fg="#ffffff"):
         btn = tk.Button(btn_frame, text=text, command=command, bg=bg, fg=fg, **button_style)
         btn.pack(pady=14, fill="x")
@@ -621,13 +622,14 @@ def launch_kiosk():
 
     create_button("View All Registered Employees", show_employee_list, "#22c55e")
     create_button("Today's Attendance Records", show_today_attendance, "#06b6d4")
-    create_button("Sync Faces from Cloud",
-    lambda: sync_from_cloud(),
-    "#8b5cf6", "#ffffff"
-)
+
+    create_button("Sync Faces from Cloud Now",
+                  lambda: load_all_from_supabase() or messagebox.showinfo("Sync", f"Reloaded {len(face_db)} faces"),
+                  "#8b5cf6", "#ffffff")
+
     create_button("Exit Application", root.quit, "#ef4444")
 
-    footer = tk.Label(root, text="Ontech Face Recognition • Powered by InsightFace + MediaPipe",
+    footer = tk.Label(root, text="Ontech • Powered by InsightFace + MediaPipe + Supabase",
                       font=("Helvetica", 10), fg="#475569", bg="#0f172a")
     footer.pack(side="bottom", pady=20)
 
