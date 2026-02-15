@@ -114,7 +114,7 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
         emp_folder = os.path.join(DATASET_FOLDER, emp_code)
         os.makedirs(emp_folder, exist_ok=True)
 
-        with st.spinner("Processing face photos..."):
+        with st.spinner("Processing face photos and creating embedding..."):
             for up_file in uploaded_files:
                 try:
                     if up_file.size > 5 * 1024 * 1024:
@@ -135,28 +135,42 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
                         messages.append(f"{up_file.name}: low confidence → skipped")
                         continue
 
-                    embeddings.append(normalize(face.embedding))
+                    emb = face.embedding  # This is the raw embedding from InsightFace
+                    emb_norm = normalize(emb)
+                    
+                    # Debug: check shape of each embedding
+                    print(f"Embedding from {up_file.name}: shape={emb.shape}, dtype={emb.dtype}")
+                    if emb.shape != (512,):
+                        messages.append(f"WARNING: {up_file.name} embedding has wrong shape {emb.shape} (expected (512,)) → skipped")
+                        continue
+
+                    embeddings.append(emb_norm)
                     fname = os.path.splitext(up_file.name)[0] + ".png"
                     img_pil.save(os.path.join(emp_folder, fname))
                 except Exception as e:
                     messages.append(f"Error processing {up_file.name}: {str(e)}")
 
         if len(embeddings) >= 3:
-            mean_emb = normalize(np.mean(embeddings, axis=0))
-            embedding_bytes = mean_emb.tobytes()
-            expected_size = 512 * 4  # buffalo_s = 512-dim float32
-            actual_size = len(embedding_bytes)
-            if actual_size == expected_size:
-                embedding_to_save = embedding_bytes
-                messages.append(f"Embedding ready ({actual_size} bytes)")
+            # Convert to array and compute mean
+            emb_stack = np.array(embeddings)  # shape should be (N, 512)
+            print(f"Stack shape before mean: {emb_stack.shape}")
+            
+            mean_emb = np.mean(emb_stack, axis=0)
+            mean_emb_norm = normalize(mean_emb)
+            
+            print(f"Mean embedding shape: {mean_emb_norm.shape}, dtype: {mean_emb_norm.dtype}")
+            
+            if mean_emb_norm.shape != (512,):
+                messages.append(f"CRITICAL: Mean embedding has wrong shape {mean_emb_norm.shape} — cannot save")
             else:
-                messages.append(f"Embedding size invalid ({actual_size} bytes, expected {expected_size}) → skipped")
+                embedding_to_save = mean_emb_norm.tobytes()
+                messages.append(f"Embedding created successfully: {len(embedding_to_save)} bytes (512 floats)")
         elif len(embeddings) > 0:
-            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3)")
+            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3 for reliable mean)")
         else:
             messages.append("⚠️ No usable face images → saving without embedding")
 
-    # Save / upsert to Supabase
+    # Save to Supabase
     with st.spinner("Saving to Supabase..."):
         try:
             data = {
@@ -166,15 +180,10 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
                 "designation": designation.strip() or None,
                 "mobile": mobile.strip() or None,
                 "notes": notes.strip() or None,
-                # Do NOT send registered_date → DB default now() will handle it
+                # No registered_date → let DB default handle it
             }
-
-            # BASE64 FIX HERE
-            import base64
             if embedding_to_save:
-                base64_encoded = base64.b64encode(embedding_to_save).decode('utf-8')
-                data["embedding"] = base64_encoded
-                messages.append(f"Embedding encoded as base64 ({len(base64_encoded)} chars)")
+                data["embedding"] = embedding_to_save
 
             response = supabase.table("employees").upsert(
                 data,
@@ -185,26 +194,15 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
             if response.data:
                 messages.append("Saved preview: " + str(response.data[0]))
 
-            return messages
-
+            st.success(f"Employee **{emp_code}** saved/updated!")
         except Exception as e:
-            error_str = str(e)
-            messages.append(f"Supabase error: {error_str}")
-            st.error(f"Save failed: {error_str}")
+            messages.append(f"Supabase save failed: {str(e)}")
+            st.error(f"Failed to save: {str(e)}")
 
-            if "bytea" in error_str or "embedding" in error_str:
-                st.warning("Embedding (bytea) issue — check if base64 encoding worked")
-            if "permission" in error_str.lower() or "policy" in error_str.lower():
-                st.warning("Permission / RLS problem — is RLS really disabled?")
-            if "constraint" in error_str.lower():
-                st.warning("Constraint violation (unique / not null / etc.)?")
-            if "type" in error_str.lower():
-                st.warning("Data type mismatch — check column types in Supabase")
+    for m in messages:
+        st.info(m)
 
-            import traceback
-            traceback.print_exc()
-            return messages
-        
+    return messages        
 #################### SECTION 7: MAIN UI & NAVIGATION ######################
 st.title("🧑‍💼 Ontech Employee & Attendance Manager")
 st.markdown(f"<h3 style='color:{PURPLE_ACCENT};'>Admin Control Panel</h3>", unsafe_allow_html=True)
