@@ -643,3 +643,10 @@ def launch_kiosk():
     footer.pack(side="bottom", pady=30)
 
     root.mainloop()
+
+# ────────────────────────────────────────────────
+# Entry point
+# ────────────────────────────────────────────────
+if __name__ == "__main__":
+    if show_splash():
+        launch_kiosk()
