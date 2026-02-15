@@ -314,13 +314,13 @@ def get_employee_history(emp_code):
         return []
 
 # ────────────────────────────────────────────────
-# Main Dashboard (updated for new structure)
+# Main Dashboard (updated for new structure + real attendance)
 # ────────────────────────────────────────────────
 if page == "Main Dashboard (Overview)":
     st.subheader("Registered Employees & Today's Attendance Status")
 
     try:
-        # Load metadata from employees
+        # Load employees metadata
         emp_response = supabase.table("employees").select(
             "emp_code, full_name, department, designation, mobile, notes"
         ).execute()
@@ -330,13 +330,29 @@ if page == "Main Dashboard (Overview)":
         emb_response = supabase.table("face_embeddings").select("emp_code").execute()
         has_emb = {row["emp_code"]: True for row in emb_response.data or []}
 
+        # Load today's attendance for "Present Today" column
+        today = datetime.date.today().isoformat()
+        att_response = supabase.table("attendance").select(
+            "emp_code, checkin_time, checkout_time"
+        ).eq("checkin_date", today).execute()
+
+        present_dict = {}
+        for r in att_response.data or []:
+            code = r["emp_code"]
+            status = f"Yes ({r['checkin_time']})" if r["checkin_time"] else "No"
+            if r["checkout_time"]:
+                status += f" - Out ({r['checkout_time']})"
+            present_dict[code] = status
+
+        present_count = len(present_dict)
+
     except Exception as e:
         st.error(f"Failed to load data: {e}")
         employees = []
+        present_dict = {}
+        present_count = 0
 
     if employees:
-        present_count = 0  # Placeholder
-
         st.caption(f"**Today ({datetime.date.today():%Y-%m-%d})**: {present_count} / {len(employees)} checked in")
 
         employees_data = []
@@ -349,6 +365,7 @@ if page == "Main Dashboard (Overview)":
             notes = emp.get("notes") or ""
 
             emb_status = "Yes" if code in has_emb else "No"
+            present_status = present_dict.get(code, "No")
 
             employees_data.append({
                 "Code": code,
@@ -358,17 +375,17 @@ if page == "Main Dashboard (Overview)":
                 "Mobile": mob,
                 "Notes": notes[:100] + "…" if len(notes) > 100 else notes,
                 "Has Embedding": emb_status,
-                "Present Today": "—"  # Update when attendance is cloud
+                "Present Today": present_status
             })
 
         df = pd.DataFrame(employees_data)
 
-        # Highlight embedding status
-        def highlight_embedding(row):
-            color = LIGHT_GREEN if row["Has Embedding"] == "Yes" else "#f8d7da"
-            return [f'background-color: {color}' if col == "Has Embedding" else '' for col in df.columns]
+        # Highlight present status
+        def highlight_present(row):
+            color = LIGHT_GREEN if "Yes" in row["Present Today"] else "#f8d7da"
+            return [f'background-color: {color}' if col == "Present Today" else '' for col in df.columns]
 
-        styled_df = df.style.apply(highlight_embedding, axis=1)
+        styled_df = df.style.apply(highlight_present, axis=1)
 
         st.dataframe(
             styled_df,
@@ -376,15 +393,16 @@ if page == "Main Dashboard (Overview)":
             hide_index=True,
             column_config={
                 "Notes": st.column_config.TextColumn(width="medium"),
-                "Has Embedding": st.column_config.TextColumn(width="small")
+                "Has Embedding": st.column_config.TextColumn(width="small"),
+                "Present Today": st.column_config.TextColumn(width="medium")
             }
         )
 
-        if st.button("🔄 Refresh", type="primary"):
+        if st.button("🔄 Refresh Dashboard", type="primary"):
             st.rerun()
 
-        # Quick edit buttons
-        st.markdown("**Quick Edit:**")
+        # Quick edit buttons - aligned better
+        st.markdown("**Quick Edit Employees:**")
         cols = st.columns(6)
         for i, emp in enumerate(employees_data):
             with cols[i % 6]:
@@ -396,7 +414,6 @@ if page == "Main Dashboard (Overview)":
                     st.rerun()
     else:
         st.info("No employees registered yet. Add someone below.", icon="ℹ️")
-
 
 
 # ────────────────────────────────────────────────

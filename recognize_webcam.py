@@ -566,83 +566,80 @@ def run_attendance_recognition():
     cv2.destroyAllWindows()
     hands.close()
 
-# ────────────────────────────────────────────────
-# Kiosk Dashboard
-# ────────────────────────────────────────────────
 def launch_kiosk():
     if not load_all_from_supabase():
         messagebox.showwarning("Cloud Warning", "Failed to load data from Supabase.")
 
     root = tk.Tk()
     root.title("Ontech Attendance Kiosk")
-    root.geometry("720x680")
+    root.geometry("800x750")  # Slightly larger for better spacing
     root.configure(bg="#0f172a")
     root.resizable(False, False)
 
+    # Header
     header_frame = tk.Frame(root, bg="#0f172a")
-    header_frame.pack(fill="x", pady=(30, 10))
+    header_frame.pack(fill="x", pady=(40, 20))
 
     tk.Label(header_frame, text="Ontech Attendance",
-             font=("Helvetica", 32, "bold"), fg="#f97316", bg="#0f172a").pack()
+             font=("Helvetica", 36, "bold"), fg="#f97316", bg="#0f172a").pack()
 
-    sync_text = f"{datetime.date.today():%Y-%m-%d} • {len(face_db)} embeddings loaded"
+    sync_text = f"{datetime.date.today():%Y-%m-%d} • {len(face_db)} employees registered"
     if last_sync_time:
         ago = (datetime.datetime.now() - last_sync_time).seconds // 60
         sync_text += f" (cloud sync {ago} min ago)"
 
     tk.Label(header_frame, text=sync_text,
-             font=("Helvetica", 14), fg="#94a3b8", bg="#0f172a").pack(pady=(4, 0))
+             font=("Helvetica", 16), fg="#94a3b8", bg="#0f172a").pack(pady=10)
 
-    status_frame = tk.Frame(root, bg="#1e293b", bd=1, relief="flat")
-    status_frame.pack(pady=20, padx=40, fill="x")
+    # Status box
+    status_frame = tk.Frame(root, bg="#1e293b", bd=2, relief="flat")
+    status_frame.pack(pady=30, padx=50, fill="x")
 
-    tk.Label(status_frame, text="Ready to scan • Place face in front of camera",
-             font=("Helvetica", 13), fg="#cbd5e1", bg="#1e293b", pady=12).pack()
+    tk.Label(status_frame, text="Ready to Scan",
+             font=("Helvetica", 24, "bold"), fg="#e2e8f0", bg="#1e293b").pack(pady=20)
 
+    tk.Label(status_frame, text="Position your face clearly in front of the camera",
+             font=("Helvetica", 14), fg="#cbd5e1", bg="#1e293b", wraplength=600, justify="center").pack(pady=10)
+
+    # Buttons - centered, even spacing
     btn_frame = tk.Frame(root, bg="#0f172a")
-    btn_frame.pack(pady=30, padx=60, fill="x")
+    btn_frame.pack(pady=40, padx=80, fill="x")
 
     button_style = {
-        "font": ("Helvetica", 15, "bold"),
-        "width": 28,
+        "font": ("Helvetica", 16, "bold"),
+        "width": 30,
         "height": 2,
         "bd": 0,
         "relief": "flat",
         "cursor": "hand2",
         "activebackground": "#334155",
+        "padx": 20,
+        "pady": 10
     }
 
     def create_button(text, command, bg, fg="#ffffff"):
         btn = tk.Button(btn_frame, text=text, command=command, bg=bg, fg=fg, **button_style)
-        btn.pack(pady=14, fill="x")
+        btn.pack(pady=12, fill="x")
         btn.bind("<Enter>", lambda e: btn.config(bg="#334155"))
         btn.bind("<Leave>", lambda e: btn.config(bg=bg))
         return btn
 
     create_button(
-        "Start Attendance Recognition",
+        "Start Face Recognition",
         lambda: threading.Thread(target=run_attendance_recognition, daemon=True).start(),
         "#f97316", "#000000"
     )
 
-    create_button("View All Registered Employees", show_employee_list, "#22c55e")
-    create_button("Today's Attendance Records", show_today_attendance, "#06b6d4")
-
-    create_button("Sync Faces from Cloud Now",
-                  lambda: load_all_from_supabase() or messagebox.showinfo("Sync", f"Reloaded {len(face_db)} embeddings"),
+    create_button("View All Employees", show_employee_list, "#22c55e")
+    create_button("Today's Attendance", show_today_attendance, "#06b6d4")
+    create_button("Sync from Cloud Now", 
+                  lambda: load_all_from_supabase() or messagebox.showinfo("Sync", f"Reloaded {len(face_db)} employees"),
                   "#8b5cf6", "#ffffff")
+    create_button("Exit", root.quit, "#ef4444")
 
-    create_button("Exit Application", root.quit, "#ef4444")
-
-    footer = tk.Label(root, text="Ontech • Powered by InsightFace + MediaPipe + Supabase",
+    # Footer
+    footer = tk.Label(root, text="Powered by InsightFace + MediaPipe + Supabase • Ontech",
                       font=("Helvetica", 10), fg="#475569", bg="#0f172a")
-    footer.pack(side="bottom", pady=20)
+    footer.pack(side="bottom", pady=30)
 
     root.mainloop()
-
-# ────────────────────────────────────────────────
-# Entry point
-# ────────────────────────────────────────────────
-if __name__ == "__main__":
-    if show_splash():
-        launch_kiosk()
