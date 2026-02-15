@@ -244,24 +244,6 @@ if page == "Main Dashboard (Overview)":
 
         df = pd.DataFrame(employees_data)
 
-        # Optional: color the embedding column
-        def highlight_embedding(row):
-            if row["Has Embedding"].startswith("Yes"):
-                return ['background-color: #d4edda'] * len(row)  # light green
-            else:
-                return ['background-color: #f8d7da'] * len(row)  # light red
-
-        styled_df = df.style.apply(highlight_embedding, axis=1)
-
-        st.dataframe(
-            styled_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Has Embedding": st.column_config.TextColumn("Has Embedding", width="medium")
-            }
-        )
-
         if st.button("🔄 Refresh table", type="primary"):
             st.rerun()
 
