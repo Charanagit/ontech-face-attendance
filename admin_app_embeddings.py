@@ -1,4 +1,3 @@
-# admin_app_embeddings.py
 import streamlit as st
 import os
 import io
@@ -10,29 +9,21 @@ from insightface.app import FaceAnalysis
 import datetime
 from supabase import create_client, Client
 
-# ────────────────────────────────────────────────
-# Page config — MUST BE THE VERY FIRST Streamlit command
-# ────────────────────────────────────────────────
+#################### SECTION 1: PAGE CONFIG & SUPABASE CLIENT ######################
 st.set_page_config(page_title="Ontech Employee Manager", layout="wide")
 
-# ────────────────────────────────────────────────
-# Supabase client
-# ────────────────────────────────────────────────
 supabase = create_client(
     st.secrets["SUPABASE_URL"],
     st.secrets["SUPABASE_KEY"]
 )
 
-# Connection status in sidebar
 try:
     supabase.table("employees").select("emp_code", count="planned").limit(0).execute()
     st.sidebar.success("Connected to Supabase ✓")
 except Exception as e:
     st.sidebar.error(f"Supabase connection issue: {str(e)}")
 
-# ────────────────────────────────────────────────
-# Color Palette
-# ────────────────────────────────────────────────
+#################### SECTION 2: STYLING & COLORS ######################
 OCEAN_BLUE   = "#0066cc"
 DEEP_BLUE    = "#004080"
 LIGHT_BLUE   = "#3A3433"
@@ -57,24 +48,21 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# ────────────────────────────────────────────────
-# Paths (local photos only — embeddings go to Supabase)
-# ────────────────────────────────────────────────
+#################### SECTION 3: PATHS & SESSION STATE ######################
 BASE_FOLDER = "data"
 DATASET_FOLDER = os.path.join(BASE_FOLDER, "dataset")
 os.makedirs(DATASET_FOLDER, exist_ok=True)
 
-# ────────────────────────────────────────────────
-# Session state
-# ────────────────────────────────────────────────
 if "selected_emp_code" not in st.session_state:
     st.session_state.selected_emp_code = None
 if "last_processed" not in st.session_state:
     st.session_state.last_processed = None
+if "save_result" not in st.session_state:
+    st.session_state.save_result = None
+if "save_messages" not in st.session_state:
+    st.session_state.save_messages = []
 
-# ────────────────────────────────────────────────
-# Face model (cached)
-# ────────────────────────────────────────────────
+#################### SECTION 4: FACE MODEL (CACHED) ######################
 @st.cache_resource
 def get_face_model():
     with st.spinner("Loading InsightFace buffalo_s model..."):
@@ -85,9 +73,7 @@ def get_face_model():
 
 app = get_face_model()
 
-# ────────────────────────────────────────────────
-# Utils
-# ────────────────────────────────────────────────
+#################### SECTION 5: UTILITY FUNCTIONS ######################
 def load_image(file_bytes):
     try:
         img = Image.open(io.BytesIO(file_bytes))
@@ -101,9 +87,7 @@ def normalize(vec):
     norm = np.linalg.norm(vec)
     return vec / norm if norm != 0 else vec
 
-# ────────────────────────────────────────────────
-# Core logic: process photos → embedding → save to Supabase
-# ────────────────────────────────────────────────
+#################### SECTION 6: CORE PROCESSING FUNCTION (PHOTOS → EMBEDDING → SAVE) ######################
 def process_employee(emp_code, full_name, department, designation, mobile, notes, uploaded_files):
     messages = []
 
@@ -119,7 +103,7 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
         emp_folder = os.path.join(DATASET_FOLDER, emp_code)
         os.makedirs(emp_folder, exist_ok=True)
 
-        with st.spinner("Processing face photos and creating embedding..."):
+        with st.spinner("Processing face photos..."):
             for up_file in uploaded_files:
                 try:
                     if up_file.size > 5 * 1024 * 1024:
@@ -132,12 +116,12 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
 
                     faces = app.get(img_cv)
                     if len(faces) != 1:
-                        messages.append(f"{up_file.name}: {len(faces)} faces detected → skipped")
+                        messages.append(f"{up_file.name}: {len(faces)} faces → skipped")
                         continue
 
                     face = faces[0]
                     if face.det_score < 0.75:
-                        messages.append(f"{up_file.name}: low detection confidence → skipped")
+                        messages.append(f"{up_file.name}: low confidence → skipped")
                         continue
 
                     embeddings.append(normalize(face.embedding))
@@ -148,14 +132,20 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
 
         if len(embeddings) >= 3:
             mean_emb = normalize(np.mean(embeddings, axis=0))
-            embedding_to_save = mean_emb.tobytes()  # for BYTEA column
-            messages.append(f"Embedding created successfully from {len(embeddings)} photos")
+            embedding_bytes = mean_emb.tobytes()
+            expected_size = 512 * 4  # buffalo_s = 512-dim float32
+            actual_size = len(embedding_bytes)
+            if actual_size == expected_size:
+                embedding_to_save = embedding_bytes
+                messages.append(f"Embedding ready ({actual_size} bytes)")
+            else:
+                messages.append(f"Embedding size invalid ({actual_size} bytes, expected {expected_size}) → skipped")
         elif len(embeddings) > 0:
-            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3 for good embedding)")
+            messages.append(f"⚠️ Only {len(embeddings)} valid images (need ≥3)")
         else:
             messages.append("⚠️ No usable face images → saving without embedding")
 
-    # Save / update in Supabase
+    # Save / upsert to Supabase
     with st.spinner("Saving to Supabase..."):
         try:
             data = {
@@ -165,61 +155,52 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
                 "designation": designation.strip() or None,
                 "mobile": mobile.strip() or None,
                 "notes": notes.strip() or None,
-                "registered_date": datetime.datetime.utcnow().isoformat(),  # UTC ISO for timestamptz
+                # We do NOT send registered_date → DB default now() will handle it
             }
             if embedding_to_save:
                 data["embedding"] = embedding_to_save
 
-            # Explicit upsert with conflict target
             response = supabase.table("employees").upsert(
                 data,
                 on_conflict="emp_code"
             ).execute()
 
-            # Show debug info (you can remove these lines later)
-            st.caption("Debug — Supabase upsert response received")
-            st.caption(f"Count affected: {response.count}")
+            messages.append(f"Upsert affected {response.count} row(s)")
             if response.data:
-                st.caption("Saved data preview: " + str(response.data[0])[:300] + "...")
+                messages.append("Saved preview: " + str(response.data[0]))
 
-            messages.append(f"Employee **{emp_code}** successfully saved/updated")
-            st.success(f"**{emp_code}** saved to database!")
+            return messages
+
         except Exception as e:
             error_str = str(e)
-            messages.append(f"Supabase save failed: {error_str}")
-            st.error(f"Failed to save: {error_str}")
+            messages.append(f"Supabase error: {error_str}")
+            st.error(f"Save failed: {error_str}")
 
-            if "column" in error_str.lower() and "does not exist" in error_str.lower():
-                st.warning("→ Check table columns: run ALTER TABLE to add missing ones (registered_date, embedding?)")
-            if "type" in error_str.lower():
-                st.warning("→ Data type mismatch — check column types in Supabase")
+            if "bytea" in error_str or "embedding" in error_str:
+                st.warning("Embedding (bytea) issue — size/type mismatch?")
             if "permission" in error_str.lower() or "policy" in error_str.lower():
-                st.warning("→ Row Level Security / policy issue — check policies or disable RLS temporarily")
+                st.warning("Permission / RLS problem — is RLS really disabled?")
+            if "constraint" in error_str.lower():
+                st.warning("Constraint violation (unique / not null / etc.)?")
+            if "type" in error_str.lower():
+                st.warning("Data type mismatch — check column types in Supabase")
 
-    return messages
+            import traceback
+            traceback.print_exc()
+            return messages
 
-# ────────────────────────────────────────────────
-# Main UI
-# ────────────────────────────────────────────────
+#################### SECTION 7: MAIN UI & NAVIGATION ######################
 st.title("🧑‍💼 Ontech Employee & Attendance Manager")
 st.markdown(f"<h3 style='color:{PURPLE_ACCENT};'>Admin Control Panel</h3>", unsafe_allow_html=True)
 
 page = st.sidebar.radio(
     "Select Section",
-    [
-        "Main Dashboard (Overview)",
-        "Register / Edit Employee",
-        "Today's Attendance",
-        "Employee Attendance History",
-        "Daily Attendance Report"
-    ]
+    ["Main Dashboard (Overview)", "Register / Edit Employee", "Today's Attendance", "Employee Attendance History", "Daily Attendance Report"]
 )
 
-# ────────────────────────────────────────────────
-# Dashboard - Overview
-# ────────────────────────────────────────────────
+#################### SECTION 8: MAIN DASHBOARD (OVERVIEW) ######################
 if page == "Main Dashboard (Overview)":
-    st.subheader("Registered Employees & Today's Attendance Status")
+    st.subheader("Registered Employees")
 
     try:
         response = supabase.table("employees").select("emp_code, full_name, department, designation, mobile, notes").execute()
@@ -229,53 +210,14 @@ if page == "Main Dashboard (Overview)":
         employees = []
 
     if employees:
-        # Attendance still local for now — placeholder
-        # today_records = get_today_present()  # import if needed
-        present_count = 0  # replace when attendance is moved to cloud
-
-        st.caption(f"**Today ({datetime.date.today():%Y-%m-%d})**: {present_count} present / {len(employees)} total")
-
-        employees_data = []
-        for emp in employees:
-            code = emp["emp_code"]
-            name = emp.get("full_name") or code
-            dept = emp.get("department") or ""
-            desig = emp.get("designation") or ""
-            mob = emp.get("mobile") or ""
-            notes = emp.get("notes") or ""
-
-            employees_data.append({
-                "Code": code,
-                "Name": name,
-                "Department": dept,
-                "Designation": desig,
-                "Mobile": mob,
-                "Notes": notes[:100] + "…" if len(notes) > 100 else notes,
-                "Present Today": "—"  # update when attendance is cloud
-            })
-
-        df = pd.DataFrame(employees_data)
+        df = pd.DataFrame(employees)
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-        if st.button("🔄 Refresh Data"):
+        if st.button("🔄 Refresh"):
             st.rerun()
-
-        st.markdown("**Quick Edit Employee:**")
-        cols = st.columns(6)
-        for i, emp in enumerate(employees_data):
-            with cols[i % 6]:
-                label = f"✏ {emp['Code']}"
-                if emp['Name'] and emp['Name'] != emp['Code']:
-                    label += f" – {emp['Name'][:15]}…"
-                if st.button(label, key=f"edit_{emp['Code']}", use_container_width=True):
-                    st.session_state.selected_emp_code = emp["Code"]
-                    st.rerun()
     else:
-        st.info("No employees registered yet. Use 'Register / Edit Employee' to add someone.", icon="ℹ️")
+        st.info("No employees registered yet. Add someone in 'Register / Edit Employee'.")
 
-# ────────────────────────────────────────────────
-# Register / Edit Employee
-# ────────────────────────────────────────────────
+#################### SECTION 9: REGISTER / EDIT EMPLOYEE PAGE ######################
 elif page == "Register / Edit Employee":
     st.subheader("Add / Edit Employee")
 
@@ -289,11 +231,11 @@ elif page == "Register / Edit Employee":
             resp = supabase.table("employees").select("*").eq("emp_code", code).execute()
             if resp.data:
                 emp = resp.data[0]
-                full_name_value = emp.get("full_name", "") or ""
-                department_value = emp.get("department", "") or ""
-                designation_value = emp.get("designation", "") or ""
-                mobile_value = emp.get("mobile", "") or ""
-                notes_value = emp.get("notes", "") or ""
+                full_name_value = emp.get("full_name", "")
+                department_value = emp.get("department", "")
+                designation_value = emp.get("designation", "")
+                mobile_value = emp.get("mobile", "")
+                notes_value = emp.get("notes", "")
                 emp_code_value = code
                 st.info(f"Editing employee: **{code}**", icon="✏️")
         except Exception as e:
@@ -331,7 +273,7 @@ elif page == "Register / Edit Employee":
         for i, file in enumerate(uploaded_files):
             try:
                 img = Image.open(file)
-                cols[i % len(cols)].image(img, caption=file.name, use_column_width=True)
+                cols[i % len(cols)].image(img, caption=file.name, use_container_width=True)
             except:
                 st.warning(f"Cannot preview {file.name}")
 
@@ -348,11 +290,11 @@ elif page == "Register / Edit Employee":
             if not emp_code:
                 st.error("Employee Code is required")
             else:
-                # Comment out guard for testing — re-enable later if needed
-                # if st.session_state.last_processed == emp_code:
-                #     st.info("Already processed this code in this session. Clear form to retry.")
-                # else:
-                with st.spinner("Processing photos and saving..."):
+                # Reset save state
+                st.session_state.save_result = None
+                st.session_state.save_messages = []
+
+                with st.spinner("Processing and saving..."):
                     msgs = process_employee(
                         emp_code=emp_code,
                         full_name=full_name,
@@ -362,107 +304,49 @@ elif page == "Register / Edit Employee":
                         notes=notes,
                         uploaded_files=uploaded_files
                     )
-                    for m in msgs:
-                        st.info(m)
-                    # Only mark processed if no clear failure
-                    if not any("fail" in m.lower() or "error" in m.lower() for m in msgs):
+                    st.session_state.save_messages = msgs
+
+                    has_error = any("error" in m.lower() or "fail" in m.lower() for m in msgs)
+                    if not has_error:
                         st.session_state.last_processed = emp_code
-                st.rerun()
+                        st.session_state.save_result = "success"
+                        st.success(f"**{emp_code}** saved successfully!")
+                        st.rerun()
+                    else:
+                        st.session_state.save_result = "error"
+                        st.error("Save had issues — check messages below")
+
+                # Show all messages persistently
+                for m in st.session_state.save_messages:
+                    if "error" in m.lower() or "fail" in m.lower():
+                        st.error(m)
+                    else:
+                        st.info(m)
 
     with col_btn2:
         if st.button("Clear Form", use_container_width=True):
-            keys_to_clear = ["emp_code_input", "full_name", "department", "designation", "mobile", "notes", "uploader"]
-            for k in keys_to_clear:
+            keys = ["emp_code_input", "full_name", "department", "designation", "mobile", "notes", "uploader"]
+            for k in keys:
                 if k in st.session_state:
                     del st.session_state[k]
             st.session_state.selected_emp_code = None
             st.session_state.last_processed = None
+            st.session_state.save_result = None
+            st.session_state.save_messages = []
             st.rerun()
 
-# The remaining pages (Today's Attendance, History, Report) are still using local DB functions
-# You can keep them as-is or start migrating attendance to Supabase too
+#################### SECTION 10: OTHER PAGES (PLACEHOLDERS — STILL LOCAL) ######################
+# Today's Attendance, History, Report — kept minimal / placeholder
+# You can expand these later when migrating attendance to Supabase
 
-# End of file
-# ────────────────────────────────────────────────
-# Today's Attendance Page (using local DB for now)
-# ────────────────────────────────────────────────
 elif page == "Today's Attendance":
     st.subheader("Today's Attendance")
+    st.info("Attendance still using local DB — coming soon to Supabase.")
 
-    today = datetime.date.today().isoformat()
-    records = get_today_present()
-
-    if records:
-        df_today = pd.DataFrame(records)
-        df_today["Status"] = df_today["checkout_time"].apply(lambda x: "Checked Out" if x != "-" else "Present")
-        st.dataframe(
-            df_today[["emp_code", "name", "department", "checkin_time", "checkout_time", "Status"]],
-            use_container_width=True,
-            hide_index=True
-        )
-        st.success(f"Total present today: {len(records)} employees")
-    else:
-        st.info("No attendance records today yet.", icon="ℹ️")
-
-
-# ────────────────────────────────────────────────
-# Employee Attendance History Page (local)
-# ────────────────────────────────────────────────
 elif page == "Employee Attendance History":
     st.subheader("Employee Attendance History")
+    st.info("Attendance history still local — coming soon.")
 
-    all_employees = get_all_employees()
-    emp_options = [f"{code} - {name or code}" for code, name, _, _, _, _ in all_employees]
-    emp_dict = {opt: code for opt, code in zip(emp_options, [r[0] for r in all_employees])}
-
-    selected = st.selectbox("Select Employee", [""] + emp_options)
-
-    if selected and selected != "":
-        code = emp_dict[selected]
-        name, _, _, _, _ = load_employee_info(code)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("From Date", value=datetime.date.today() - datetime.timedelta(days=30))
-        with col2:
-            end_date = st.date_input("To Date", value=datetime.date.today())
-
-        if st.button("Show History"):
-            history = get_attendance_history_for_employee(code, limit=100)
-            filtered = [r for r in history if start_date.isoformat() <= r["date"] <= end_date.isoformat()]
-
-            if filtered:
-                df_hist = pd.DataFrame(filtered)
-                st.dataframe(
-                    df_hist[["date", "checkin_time", "checkout_time", "status"]],
-                    use_container_width=True,
-                    hide_index=True
-                )
-                st.success(f"Found {len(filtered)} records between {start_date} and {end_date}")
-            else:
-                st.warning("No attendance records found in selected date range.")
-
-
-# ────────────────────────────────────────────────
-# Daily Attendance Report Page (local)
-# ────────────────────────────────────────────────
 elif page == "Daily Attendance Report":
     st.subheader("Daily Attendance Report")
-
-    selected_date = st.date_input("Select Date", value=datetime.date.today())
-
-    if st.button("View Report"):
-        date_str = selected_date.isoformat()
-        daily_records = get_attendance_for_date(date_str)
-
-        if daily_records:
-            df_daily = pd.DataFrame(daily_records)
-            df_daily["Status"] = df_daily["checkout_time"].apply(lambda x: "Checked Out" if x != "-" else "Present")
-            st.dataframe(
-                df_daily[["emp_code", "name", "department", "checkin_time", "checkout_time", "Status"]],
-                use_container_width=True,
-                hide_index=True
-            )
-            st.success(f"Total records on {date_str}: {len(daily_records)}")
-        else:
-            st.info(f"No attendance records found for {date_str}.", icon="ℹ️")
+    st.info("Daily reports still local — coming soon.")
