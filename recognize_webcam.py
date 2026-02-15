@@ -14,6 +14,12 @@ import winsound
 import base64
 import mediapipe as mp
 from supabase import create_client, Client
+import traceback  # For full error stack if needed
+
+if getattr(sys, 'frozen', False):
+    bundle_dir = sys._MEIPASS
+    os.environ["INSIGHTFACE_HOME"] = bundle_dir
+    print(f"[BUNDLED] INSIGHTFACE_HOME set to: {bundle_dir}")
 
 # ────────────────────────────────────────────────
 # Supabase Config
@@ -78,7 +84,7 @@ def get_face_analyzer():
         try:
             from insightface.app import FaceAnalysis
             print("Loading InsightFace buffalo_s ...")
-            face_analyzer = FaceAnalysis(name="buffalo_s", providers=["CPUExecutionProvider"])
+            face_analyzer = FaceAnalysis(name="buffalo_s", providers=["CPUExecutionProvider"], allowed_modules=['detection', 'recognition']) # Skip landmark to avoid crash
             face_analyzer.prepare(ctx_id=0, det_size=(320, 320), det_thresh=0.32)
             print("InsightFace ready")
         except Exception as e:
@@ -146,7 +152,10 @@ def load_all_from_supabase():
     except Exception as e:
         print(f"Load failed: {e}")
         messagebox.showerror("Sync Error", str(e))
-        return False# Attendance (Supabase only)
+        return False
+
+# ────────────────────────────────────────────────
+# Attendance (Supabase only)
 # ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
     emp_code = emp_code.strip().upper()
@@ -483,11 +492,15 @@ def run_attendance_recognition():
                     info = employee_info.get(best_code, {"full_name": best_code})
                     display_name = f"{info['full_name']} " if info['department'] else info['full_name']
                     bbox = face.bbox.astype(int)
+                    
+                    # FIXED: use tuple () instead of set {}
                     results.append((bbox, display_name, best_score, face.det_score, best_code))
 
                 last_results = results
+
             except Exception as e:
-                print(f"Face error: {e}")
+                print(f"[FACE CRASH] {str(e)}")
+                print(traceback.format_exc())
                 last_results = []
 
         # Draw & action
