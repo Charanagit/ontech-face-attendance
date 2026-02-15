@@ -8,6 +8,7 @@ import cv2
 from insightface.app import FaceAnalysis
 import datetime
 from supabase import create_client, Client
+import base64
 
 #################### SECTION 1: PAGE CONFIG & SUPABASE CLIENT ######################
 st.set_page_config(page_title="Ontech Employee Manager", layout="wide")
@@ -87,7 +88,7 @@ def normalize(vec):
     norm = np.linalg.norm(vec)
     return vec / norm if norm != 0 else vec
 
-#################### SECTION 6: CORE PROCESSING FUNCTION (PHOTOS → EMBEDDING → SAVE) ######################
+#################### SECTION 6: CORE PROCESSING FUNCTION (UPDATED WITH BASE64 FIX) ######################
 def process_employee(emp_code, full_name, department, designation, mobile, notes, uploaded_files):
     messages = []
 
@@ -155,10 +156,15 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
                 "designation": designation.strip() or None,
                 "mobile": mobile.strip() or None,
                 "notes": notes.strip() or None,
-                # We do NOT send registered_date → DB default now() will handle it
+                # Do NOT send registered_date → DB default now() will handle it
             }
+
+            # BASE64 FIX HERE
+            import base64
             if embedding_to_save:
-                data["embedding"] = embedding_to_save
+                base64_encoded = base64.b64encode(embedding_to_save).decode('utf-8')
+                data["embedding"] = base64_encoded
+                messages.append(f"Embedding encoded as base64 ({len(base64_encoded)} chars)")
 
             response = supabase.table("employees").upsert(
                 data,
@@ -177,7 +183,7 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
             st.error(f"Save failed: {error_str}")
 
             if "bytea" in error_str or "embedding" in error_str:
-                st.warning("Embedding (bytea) issue — size/type mismatch?")
+                st.warning("Embedding (bytea) issue — check if base64 encoding worked")
             if "permission" in error_str.lower() or "policy" in error_str.lower():
                 st.warning("Permission / RLS problem — is RLS really disabled?")
             if "constraint" in error_str.lower():
@@ -188,7 +194,7 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
             import traceback
             traceback.print_exc()
             return messages
-
+        
 #################### SECTION 7: MAIN UI & NAVIGATION ######################
 st.title("🧑‍💼 Ontech Employee & Attendance Manager")
 st.markdown(f"<h3 style='color:{PURPLE_ACCENT};'>Admin Control Panel</h3>", unsafe_allow_html=True)
