@@ -88,6 +88,16 @@ def normalize(vec):
     norm = np.linalg.norm(vec)
     return vec / norm if norm != 0 else vec
 
+def has_embedding(emp):
+    emb = emp.get("embedding")
+    if emb is None:
+        return "No"
+    if isinstance(emb, bytes):
+        return f"Yes ({len(emb)} bytes)"
+    if isinstance(emb, str):  # in case base64
+        return f"Yes (base64)"
+    return "Yes"
+
 #################### SECTION 6: CORE PROCESSING FUNCTION (UPDATED WITH BASE64 FIX) ######################
 def process_employee(emp_code, full_name, department, designation, mobile, notes, uploaded_files):
     messages = []
@@ -209,20 +219,55 @@ if page == "Main Dashboard (Overview)":
     st.subheader("Registered Employees")
 
     try:
-        response = supabase.table("employees").select("emp_code, full_name, department, designation, mobile, notes").execute()
+        # Fetch embedding presence too
+        response = supabase.table("employees").select(
+            "emp_code, full_name, department, designation, mobile, notes, embedding"
+        ).execute()
         employees = response.data or []
     except Exception as e:
         st.error(f"Failed to load employees: {e}")
         employees = []
 
     if employees:
-        df = pd.DataFrame(employees)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        if st.button("🔄 Refresh"):
+        # Prepare data with embedding status
+        employees_data = []
+        for emp in employees:
+            employees_data.append({
+                "Code": emp["emp_code"],
+                "Name": emp.get("full_name") or emp["emp_code"],
+                "Department": emp.get("department") or "",
+                "Designation": emp.get("designation") or "",
+                "Mobile": emp.get("mobile") or "",
+                "Notes": emp.get("notes") or "",
+                "Has Embedding": has_embedding(emp)
+            })
+
+        df = pd.DataFrame(employees_data)
+
+        # Optional: color the embedding column
+        def highlight_embedding(row):
+            if row["Has Embedding"].startswith("Yes"):
+                return ['background-color: #d4edda'] * len(row)  # light green
+            else:
+                return ['background-color: #f8d7da'] * len(row)  # light red
+
+        styled_df = df.style.apply(highlight_embedding, axis=1)
+
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Has Embedding": st.column_config.TextColumn("Has Embedding", width="medium")
+            }
+        )
+
+        if st.button("🔄 Refresh table", type="primary"):
             st.rerun()
+
     else:
         st.info("No employees registered yet. Add someone in 'Register / Edit Employee'.")
-
+        
 #################### SECTION 9: REGISTER / EDIT EMPLOYEE PAGE ######################
 elif page == "Register / Edit Employee":
     st.subheader("Add / Edit Employee")
@@ -296,7 +341,7 @@ elif page == "Register / Edit Employee":
             if not emp_code:
                 st.error("Employee Code is required")
             else:
-                # Reset save state
+                # Reset previous save state
                 st.session_state.save_result = None
                 st.session_state.save_messages = []
 
@@ -312,23 +357,24 @@ elif page == "Register / Edit Employee":
                     )
                     st.session_state.save_messages = msgs
 
-                    has_error = any("error" in m.lower() or "fail" in m.lower() for m in msgs)
-                    if not has_error:
-                        st.session_state.last_processed = emp_code
-                        st.session_state.save_result = "success"
-                        st.success(f"**{emp_code}** saved successfully!")
-                        st.rerun()
-                    else:
-                        st.session_state.save_result = "error"
-                        st.error("Save had issues — check messages below")
+                # Show messages persistently (no auto-rerun yet)
+                has_error = any("error" in m.lower() or "fail" in m.lower() for m in msgs)
 
-                # Show all messages persistently
+                if has_error:
+                    st.session_state.save_result = "error"
+                    st.error("Save had issues — read messages below")
+                else:
+                    st.session_state.save_result = "success"
+                    st.success(f"**{emp_code}** saved successfully! Press Refresh table to see changes.")
+                    st.session_state.last_processed = emp_code
+
+                # Always show all messages after save attempt
                 for m in st.session_state.save_messages:
                     if "error" in m.lower() or "fail" in m.lower():
                         st.error(m)
                     else:
                         st.info(m)
-
+                        
     with col_btn2:
         if st.button("Clear Form", use_container_width=True):
             keys = ["emp_code_input", "full_name", "department", "designation", "mobile", "notes", "uploader"]
