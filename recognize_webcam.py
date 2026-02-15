@@ -124,50 +124,47 @@ def load_all_from_supabase():
             emb_raw = row.get("embedding")
             if emb_raw is not None:
                         try:
-                            print(f"Processing embedding for {code} (type: {type(emb_raw).__name__}, len: {len(emb_raw) if isinstance(emb_raw, (str, bytes)) else 'n/a'})")
+                            print(f"Raw embedding type: {type(emb_raw).__name__}, preview: {str(emb_raw)[:50]}...")
 
                             if isinstance(emb_raw, bytes):
                                 emb_bytes = emb_raw
-                                print(f"Direct bytes → {len(emb_bytes)} bytes")
+                                print(f"Direct bytes received → length {len(emb_bytes)}")
+
+                            elif isinstance(emb_raw, str) and emb_raw.startswith("\\x"):
+                                # Postgres hex dump (most common case now)
+                                hex_str = emb_raw[2:]  # remove \x prefix
+                                emb_bytes = bytes.fromhex(hex_str)
+                                print(f"Converted hex dump → {len(emb_bytes)} bytes")
 
                             elif isinstance(emb_raw, str):
-                                emb_clean = emb_raw.strip()
-
-                                # Detect Postgres hex dump (\x...)
-                                if emb_clean.startswith("\\x"):
-                                    # Remove \x prefix, convert hex string to bytes
-                                    hex_str = emb_clean[2:]  # skip \x
-                                    emb_bytes = bytes.fromhex(hex_str)
-                                    print(f"Postgres hex dump → {len(emb_bytes)} bytes")
-
-                                else:
-                                    # Assume base64, clean + pad
-                                    emb_clean = emb_clean.replace("\n", "").replace("\r", "").replace(" ", "")
-                                    padding = (4 - len(emb_clean) % 4) % 4
-                                    emb_clean += "=" * padding
-                                    emb_bytes = base64.b64decode(emb_clean, validate=False)
-                                    print(f"Base64 decoded → {len(emb_bytes)} bytes")
+                                # Fallback: assume base64
+                                emb_clean = emb_raw.strip().replace("\n", "").replace(" ", "")
+                                padding = (4 - len(emb_clean) % 4) % 4
+                                emb_clean += "=" * padding
+                                emb_bytes = base64.b64decode(emb_clean, validate=False)
+                                print(f"Base64 fallback → {len(emb_bytes)} bytes")
 
                             else:
-                                print(f"Unknown type → skipping")
+                                print("Unknown embedding format → skipping")
                                 continue
 
-                            # Convert to numpy float32
+                            # Convert to float32 array
                             emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
-                            actual = len(emb_array)
-                            print(f"Array shape: {actual} floats")
+                            actual_len = len(emb_array)
+                            print(f"Array length: {actual_len} floats")
 
-                            # Accept wide range for now (your current is 683, but admin now saves 512)
-                            if 400 <= actual <= 800:
+                            # Accept any reasonable size for now
+                            if 400 <= actual_len <= 800:
                                 face_db[code] = emb_array
                                 count += 1
-                                print(f"→ ACCEPTED {code} ({actual} floats)")
+                                print(f"→ LOADED {code} ({actual_len} floats)")
                             else:
-                                print(f"→ REJECTED {code}: {actual} floats (out of range)")
+                                print(f"→ REJECTED {code}: {actual_len} floats (unusual size)")
 
                         except Exception as e:
-                            print(f"→ FAILED {code}: {str(e)}")
+                            print(f"→ PARSE FAILED {code}: {str(e)}")
                             continue
+        
         last_sync_time = datetime.datetime.now()
         print(f"\nFinal: {len(employee_info)} employees, {count} embeddings loaded")
         if count == 0 and len(employee_info) > 0:
