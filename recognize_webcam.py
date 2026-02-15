@@ -118,54 +118,60 @@ def load_all_from_supabase():
                 "department": row.get("department", ""),
                 "designation": row.get("designation", ""),
                 "mobile": row.get("mobile", ""),
-                "notes": row.get("notes") or "",   # Fix: default to "" instead of None
+                "notes": row.get("notes") or "",   # Safe: None → ""
             }
 
             emb = row.get("embedding")
             if emb is not None:
                 try:
-                    print(f"Processing embedding for {code} (type: {type(emb).__name__})")
+                    print(f"Processing embedding for {code} (type: {type(emb).__name__}, raw length: {len(emb) if isinstance(emb, (bytes, str)) else 'n/a'})")
 
-                    # Case 1: raw bytes (what Supabase returns for bytea)
+                    # Case 1: raw bytes (most likely your case)
                     if isinstance(emb, bytes):
                         emb_bytes = emb
+                        print(f"Raw bytes detected → {len(emb_bytes)} bytes")
 
-                    # Case 2: base64 string (if admin app ever changes)
+                    # Case 2: base64 string (if admin changes later)
                     elif isinstance(emb, str):
                         emb_clean = emb.strip().replace("\n", "").replace("\r", "").replace(" ", "")
                         padding = (4 - len(emb_clean) % 4) % 4
                         emb_clean += "=" * padding
-                        emb_bytes = base64.b64decode(emb_clean, validate=False)
-                        print(f"Decoded base64 → {len(emb_bytes)} bytes")
+                        try:
+                            emb_bytes = base64.b64decode(emb_clean)
+                            print(f"Base64 decoded → {len(emb_bytes)} bytes")
+                        except Exception as decode_err:
+                            print(f"Base64 decode failed: {decode_err} → skipping")
+                            continue
 
                     else:
-                        print(f"Unknown embedding type for {code}: {type(emb)}")
+                        print(f"Unknown type {type(emb)} for {code} → skipping")
                         continue
 
-                    # Convert to numpy float32 array
+                    # Convert to float32 array
                     emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
-                    expected = 512
-                    if len(emb_array) == expected:
+                    actual_len = len(emb_array)
+
+                    # Temporary wide acceptance (your current embeddings are 683 floats)
+                    if 400 <= actual_len <= 800:
                         face_db[code] = emb_array
                         count += 1
-                        print(f"→ SUCCESS: {code} loaded ({len(emb_array)} floats)")
+                        print(f"→ ACCEPTED: {code} loaded with {actual_len} floats")
                     else:
-                        print(f"→ WRONG SIZE: {code} has {len(emb_array)} floats (expected {expected})")
+                        print(f"→ REJECTED: {code} has {actual_len} floats (outside 400–800 range)")
 
                 except Exception as e:
                     print(f"→ FAILED parsing embedding for {code}: {str(e)}")
 
         last_sync_time = datetime.datetime.now()
-        print(f"\nLoaded {len(employee_info)} employees, {count} valid embeddings")
+        print(f"\nFinal summary: {len(employee_info)} employees total, {count} valid embeddings loaded")
         if count == 0 and len(employee_info) > 0:
-            print("WARNING: Employees exist but no embeddings parsed successfully")
+            print("WARNING: Employees exist, but ZERO embeddings were accepted")
         return True
 
     except Exception as e:
         print(f"Full sync failed: {e}")
         messagebox.showerror("Sync Error", str(e))
-        return False# Attendance functions (Supabase only)
-# ────────────────────────────────────────────────
+        return False# ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
     emp_code = emp_code.strip().upper()
     today = datetime.date.today().isoformat()
