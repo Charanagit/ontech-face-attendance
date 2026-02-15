@@ -9,11 +9,23 @@ from insightface.app import FaceAnalysis
 import datetime
 import base64  # For embedding serialization
 from supabase import create_client, Client
+from datetime import datetime
+import pytz
 
 # ────────────────────────────────────────────────
 # Page config — MUST BE FIRST
 # ────────────────────────────────────────────────
 st.set_page_config(page_title="Ontech Employee Manager", layout="wide")
+
+# Force Colombo time (UTC+5:30, same as Mumbai/IST)
+COLOMBO_TZ = pytz.timezone("Asia/Colombo")
+
+# Replace all datetime.date.today() with this
+def today_colombo():
+    return datetime.now(COLOMBO_TZ).date()
+
+def now_colombo():
+    return datetime.now(COLOMBO_TZ)
 
 # ────────────────────────────────────────────────
 # Supabase client
@@ -263,7 +275,7 @@ page = st.sidebar.radio(
 # Attendance functions (Supabase)
 # ────────────────────────────────────────────────
 def get_today_attendance():
-    today = datetime.date.today().isoformat()
+    today = today_colombo().isoformat()
     try:
         response = supabase.table("attendance")\
             .select("emp_code, checkin_time, checkout_time")\
@@ -331,7 +343,7 @@ if page == "Main Dashboard (Overview)":
         has_emb = {row["emp_code"]: True for row in emb_response.data or []}
 
         # Load today's attendance for "Present Today" column
-        today = datetime.date.today().isoformat()
+        today = today_colombo().isoformat()
         att_response = supabase.table("attendance").select(
             "emp_code, checkin_time, checkout_time"
         ).eq("checkin_date", today).execute()
@@ -353,7 +365,7 @@ if page == "Main Dashboard (Overview)":
         present_count = 0
 
     if employees:
-        st.caption(f"**Today ({datetime.date.today():%Y-%m-%d})**: {present_count} / {len(employees)} checked in")
+        st.caption(f"**Today ({today_colombo():%Y-%m-%d})**: {present_count} / {len(employees)} checked in")
 
         employees_data = []
         for emp in employees:
