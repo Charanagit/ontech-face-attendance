@@ -95,7 +95,7 @@ def load_all_from_supabase():
     employee_info = {}
 
     try:
-        # Load employee metadata
+        # Load employee metadata (no embedding here anymore)
         emp_response = supabase.table("employees").select(
             "emp_code, full_name, department, designation, mobile, notes"
         ).execute()
@@ -110,8 +110,10 @@ def load_all_from_supabase():
                 "notes": row.get("notes") or "",
             }
 
-        # Load embeddings from separate table
-        emb_response = supabase.table("face_embeddings").select("emp_code, embedding_base64").execute()
+        # Load embeddings from dedicated table
+        emb_response = supabase.table("face_embeddings").select(
+            "emp_code, embedding_base64"
+        ).execute()
 
         count = 0
         for row in emb_response.data:
@@ -125,23 +127,26 @@ def load_all_from_supabase():
 
                     print(f"Loaded embedding for {code}: {actual_len} floats")
 
-                    if actual_len == 512:  # enforce correct size now
+                    if actual_len == 512:
                         face_db[code] = emb_array
                         count += 1
+                        print(f"→ VALID 512-dim embedding loaded for {code}")
                     else:
                         print(f"→ REJECTED {code}: wrong size {actual_len} (expected 512)")
+
                 except Exception as e:
-                    print(f"→ FAILED decoding embedding for {code}: {str(e)}")
+                    print(f"→ FAILED decoding {code}: {str(e)}")
 
         last_sync_time = datetime.datetime.now()
-        print(f"\nLoaded {len(employee_info)} employees, {count} valid 512-dim embeddings")
+        print(f"\nSummary: {len(employee_info)} employees, {count} valid 512-dim embeddings")
+        if count == 0 and len(employee_info) > 0:
+            print("WARNING: Employees exist but no valid embeddings loaded")
         return True
 
     except Exception as e:
         print(f"Load failed: {e}")
         messagebox.showerror("Sync Error", str(e))
-        return False# ────────────────────────────────────────────────
-# Attendance (Supabase only)
+        return False# Attendance (Supabase only)
 # ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
     emp_code = emp_code.strip().upper()
