@@ -89,16 +89,6 @@ def get_face_model():
 
 app = get_face_model()
 
-# Debug InsightFace output dimension
-print("InsightFace model loaded. Testing embedding size...")
-test_img = np.zeros((640, 640, 3), dtype=np.uint8) + 127  # gray image to force detection
-test_faces = app.get(test_img)
-if test_faces:
-    emb_test = test_faces[0].embedding
-    print(f"Test face embedding shape: {emb_test.shape}, dtype: {emb_test.dtype}, bytes: {len(emb_test.tobytes())}")
-else:
-    print("No face detected in test image — model may need real photo")
-
 # ────────────────────────────────────────────────
 # Utils
 # ────────────────────────────────────────────────
@@ -115,15 +105,17 @@ def normalize(vec):
     norm = np.linalg.norm(vec)
     return vec / norm if norm != 0 else vec
 
-def has_embedding(emp):
-    emb = emp.get("embedding")
-    if emb is None:
+def has_embedding(emp_code):
+    try:
+        response = supabase.table("face_embeddings").select("embedding_base64").eq("emp_code", emp_code).execute()
+        if response.data:
+            b64_str = response.data[0].get("embedding_base64")
+            if b64_str:
+                return f"Yes ({len(b64_str)} chars)"
         return "No"
-    if isinstance(emb, bytes):
-        return f"Yes ({len(emb)} bytes)"
-    if isinstance(emb, str):
-        return f"Yes (base64)"
-    return "Yes"
+    except Exception as e:
+        st.warning(f"Embedding status check failed for {emp_code}: {str(e)}")
+        return "Error"
 
 # ────────────────────────────────────────────────
 # Core: process photos → embedding → save to Supabase
@@ -146,7 +138,7 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
         with st.spinner("Processing up to 3 valid face photos..."):
             valid_count = 0
             for up_file in uploaded_files:
-                if valid_count >= 3:  # Limit to 3 valid photos
+                if valid_count >= 3:
                     messages.append(f"Stopped at 3 valid photos — {up_file.name} ignored")
                     break
 
@@ -173,7 +165,6 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
                     emb = face.embedding
                     emb_norm = normalize(emb)
                     
-                    # Validate shape (must be 512 for buffalo_s)
                     if emb_norm.shape != (512,):
                         messages.append(f"{up_file.name}: wrong embedding shape {emb_norm.shape} → skipped")
                         continue
@@ -202,40 +193,42 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
         else:
             messages.append("⚠️ No valid photos → saving without embedding")
 
-    # Save / upsert to Supabase
+    # Save / upsert to Supabase (new structure)
     with st.spinner("Saving to Supabase..."):
         try:
-            data = {
+            # Save metadata to employees table
+            emp_data = {
                 "emp_code": emp_code,
                 "full_name": full_name.strip() or None,
                 "department": department.strip() or None,
                 "designation": designation.strip() or None,
                 "mobile": mobile.strip() or None,
                 "notes": notes.strip() or None,
-                # Let DB default handle registered_date / updated_at
             }
 
-            # FIXED: Base64-encode embedding to avoid "bytes not JSON serializable"
-            if embedding_to_save:
-                # Save to separate embeddings table
-                b64_encoded = base64.b64encode(embedding_to_save).decode('utf-8')
-                try:
-                    supabase.table("face_embeddings").upsert({
-                        "emp_code": emp_code,
-                        "embedding_base64": b64_encoded
-                    }, on_conflict="emp_code").execute()
-                    messages.append(f"Embedding saved to face_embeddings table (base64, {len(b64_encoded)} chars)")
-                except Exception as e:
-                    messages.append(f"Embedding table save failed: {str(e)}")
-                    st.warning(f"Embedding save failed: {str(e)}")
-            response = supabase.table("employees").upsert(
-                data,
+            emp_response = supabase.table("employees").upsert(
+                emp_data,
                 on_conflict="emp_code"
             ).execute()
 
-            messages.append(f"Supabase affected {response.count} row(s)")
-            if response.data:
-                messages.append("Saved preview: " + str(response.data[0]))
+            messages.append(f"Metadata saved to employees table ({emp_response.count} row(s))")
+
+            # Save embedding to separate face_embeddings table
+            if embedding_to_save:
+                b64_encoded = base64.b64encode(embedding_to_save).decode('utf-8')
+                emb_data = {
+                    "emp_code": emp_code,
+                    "embedding_base64": b64_encoded
+                }
+
+                emb_response = supabase.table("face_embeddings").upsert(
+                    emb_data,
+                    on_conflict="emp_code"
+                ).execute()
+
+                messages.append(f"Embedding saved to face_embeddings table ({emb_response.count} row(s), {len(b64_encoded)} chars)")
+            else:
+                messages.append("No embedding to save (metadata only)")
 
             return messages
 
@@ -249,7 +242,7 @@ def process_employee(emp_code, full_name, department, designation, mobile, notes
             if "permission" in error_str.lower():
                 st.warning("RLS / permission — disable RLS for testing")
             if "column" in error_str.lower():
-                st.warning("Missing column — add embedding / registered_date in Supabase")
+                st.warning("Missing column — check table structure")
 
             import traceback
             traceback.print_exc()
@@ -267,22 +260,28 @@ page = st.sidebar.radio(
 )
 
 # ────────────────────────────────────────────────
-# Main Dashboard (with embedding status)
+# Main Dashboard (updated for new structure)
 # ────────────────────────────────────────────────
 if page == "Main Dashboard (Overview)":
     st.subheader("Registered Employees & Today's Attendance Status")
 
     try:
-        response = supabase.table("employees").select(
-            "emp_code, full_name, department, designation, mobile, notes, embedding"
+        # Load metadata from employees
+        emp_response = supabase.table("employees").select(
+            "emp_code, full_name, department, designation, mobile, notes"
         ).execute()
-        employees = response.data or []
+        employees = emp_response.data or []
+
+        # Load embedding status from face_embeddings
+        emb_response = supabase.table("face_embeddings").select("emp_code").execute()
+        has_emb = {row["emp_code"]: True for row in emb_response.data or []}
+
     except Exception as e:
-        st.error(f"Failed to load employees: {e}")
+        st.error(f"Failed to load data: {e}")
         employees = []
 
     if employees:
-        present_count = 0  # Placeholder until attendance migrated
+        present_count = 0  # Placeholder
 
         st.caption(f"**Today ({datetime.date.today():%Y-%m-%d})**: {present_count} / {len(employees)} checked in")
 
@@ -295,6 +294,8 @@ if page == "Main Dashboard (Overview)":
             mob = emp.get("mobile") or ""
             notes = emp.get("notes") or ""
 
+            emb_status = "Yes" if code in has_emb else "No"
+
             employees_data.append({
                 "Code": code,
                 "Name": name,
@@ -302,7 +303,7 @@ if page == "Main Dashboard (Overview)":
                 "Designation": desig,
                 "Mobile": mob,
                 "Notes": notes[:100] + "…" if len(notes) > 100 else notes,
-                "Has Embedding": has_embedding(emp),
+                "Has Embedding": emb_status,
                 "Present Today": "—"  # Update when attendance is cloud
             })
 
@@ -310,7 +311,7 @@ if page == "Main Dashboard (Overview)":
 
         # Highlight embedding status
         def highlight_embedding(row):
-            color = LIGHT_GREEN if row["Has Embedding"].startswith("Yes") else "#f8d7da"
+            color = LIGHT_GREEN if row["Has Embedding"] == "Yes" else "#f8d7da"
             return [f'background-color: {color}' if col == "Has Embedding" else '' for col in df.columns]
 
         styled_df = df.style.apply(highlight_embedding, axis=1)
@@ -343,7 +344,7 @@ if page == "Main Dashboard (Overview)":
         st.info("No employees registered yet. Add someone below.", icon="ℹ️")
 
 # ────────────────────────────────────────────────
-# Register / Edit Employee (with photo limit & edit support)
+# Register / Edit Employee (updated for new structure)
 # ────────────────────────────────────────────────
 elif page == "Register / Edit Employee":
     st.subheader("Add / Edit Employee")
