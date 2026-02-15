@@ -121,48 +121,54 @@ def load_all_from_supabase():
                 "notes": row.get("notes", ""),
             }
 
-            emb = row.get("embedding")
-            if emb:
+            emb_raw = row.get("embedding")
+            if emb_raw:
                 try:
-                    if isinstance(emb, str):
-                        # Clean and fix padding
-                        emb_clean = emb.strip()
-                        # Add missing = padding if needed
-                        padding = (4 - len(emb_clean) % 4) % 4
-                        emb_clean += "=" * padding
-                        
+                    print(f"Processing embedding for {code} (type: {type(emb_raw)}, length: {len(emb_raw) if isinstance(emb_raw, str) else 'n/a'})")
+
+                    if isinstance(emb_raw, str):
+                        # Clean aggressively
+                        emb_clean = emb_raw.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+                        print(f"Cleaned base64 length: {len(emb_clean)}")
+
+                        # Auto-fix padding
+                        padding_needed = (4 - len(emb_clean) % 4) % 4
+                        emb_clean += "=" * padding_needed
+                        print(f"After padding: length {len(emb_clean)}")
+
                         try:
                             emb_bytes = base64.b64decode(emb_clean)
                         except Exception as decode_err:
-                            print(f"Base64 decode still failed for {code}: {decode_err}")
-                            # Last resort: try without padding fix
+                            print(f"Strict decode failed: {decode_err} → trying non-strict")
                             emb_bytes = base64.b64decode(emb_clean, validate=False)
-                    
+
                     else:
-                        emb_bytes = emb  # if raw bytes (unlikely)
+                        # Rare case: raw bytes
+                        emb_bytes = emb_raw
 
                     emb_array = np.frombuffer(emb_bytes, dtype=np.float32)
-                    expected_len = 512  # buffalo_s / most InsightFace models
-                    if len(emb_array) == expected_len:
+                    expected = 512
+                    actual = len(emb_array)
+                    if actual == expected:
                         face_db[code] = emb_array
                         count += 1
-                        print(f"Successfully loaded embedding for {code}")
+                        print(f"→ SUCCESS: loaded embedding for {code} ({actual} floats)")
                     else:
-                        print(f"Wrong size for {code}: {len(emb_array)} (expected {expected_len})")
+                        print(f"→ WRONG SIZE for {code}: {actual} floats (expected {expected})")
+
                 except Exception as e:
-                    print(f"Embedding parse failed for {code}: {e}")
+                    print(f"→ FAILED to parse embedding for {code}: {str(e)}")
 
         last_sync_time = datetime.datetime.now()
-        print(f"Loaded {len(employee_info)} employees, {count} valid embeddings from Supabase")
+        print(f"\nFinal: {len(employee_info)} employees, {count} valid embeddings loaded")
         if count == 0 and len(employee_info) > 0:
-            print("Warning: Employees exist but no valid embeddings were parsed")
+            print("WARNING: Employees exist but ZERO valid embeddings parsed")
         return True
 
     except Exception as e:
         print(f"Full load failed: {e}")
         messagebox.showerror("Sync Error", str(e))
-        return False
-# ────────────────────────────────────────────────
+        return False# ────────────────────────────────────────────────
 # Attendance functions (Supabase only)
 # ────────────────────────────────────────────────
 def mark_present(emp_code: str) -> bool:
