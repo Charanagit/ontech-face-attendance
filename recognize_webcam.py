@@ -49,7 +49,15 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# Use writable user-specific folder instead of app directory
+# This prevents crashes in Program Files (read-only)
+USER_APPDATA = os.getenv('APPDATA')
+if USER_APPDATA is None:
+    USER_APPDATA = os.path.expanduser('~\\AppData\\Roaming')
+APP_DATA_ROOT = os.path.join(USER_APPDATA, 'OntechAttendance')
+os.makedirs(APP_DATA_ROOT, exist_ok=True)
+
+DATA_DIR = os.path.join(APP_DATA_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 COLOR_SUCCESS = (0, 255, 120)
@@ -84,7 +92,7 @@ def get_face_analyzer():
         try:
             from insightface.app import FaceAnalysis
             print("Loading InsightFace buffalo_s ...")
-            face_analyzer = FaceAnalysis(name="buffalo_s", providers=["CPUExecutionProvider"], allowed_modules=['detection', 'recognition']) # Skip landmark to avoid crash
+            face_analyzer = FaceAnalysis(name="buffalo_s", providers=["CUDAExecutionProvider", "CPUExecutionProvider"], allowed_modules=['detection', 'recognition']) # Try GPU first, fallback to CPU
             face_analyzer.prepare(ctx_id=0, det_size=(320, 320), det_thresh=0.32)
             print("InsightFace ready")
         except Exception as e:
@@ -386,6 +394,15 @@ def show_today_attendance():
 # Recognition loop
 # ────────────────────────────────────────────────
 def run_attendance_recognition():
+    print("Available cameras:")
+    for i in range(5):
+        c = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        if c.isOpened():
+            print(f"→ Camera {i} works")
+            c.release()
+        else:
+            print(f"→ Camera {i} FAILED")
+            
     global success_message_start, success_message_text, gesture_active_until
 
     analyzer = get_face_analyzer()
@@ -401,10 +418,17 @@ def run_attendance_recognition():
 
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
+        print("CAP_DSHOW failed → trying plain index 0")
         cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        messagebox.showerror("Error", "Webcam not found.")
-        return
+        print("CAP_DSHOW failed → trying index 1")
+        cap = cv2.VideoCapture(1)
+    if not cap.isOpened():
+        print("CAP_DSHOW failed → trying index 2")
+        cap = cv2.VideoCapture(2)
+
+    print(f"Final cap opened: {cap.isOpened()}")
+    print(f"Backend: {cap.getBackendName() if hasattr(cap, 'getBackendName') else 'unknown'}")
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
