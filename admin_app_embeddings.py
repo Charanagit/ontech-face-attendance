@@ -30,11 +30,10 @@ def now_colombo():
 # ────────────────────────────────────────────────
 # Supabase client
 # ────────────────────────────────────────────────
-supabase = create_client(
-    st.secrets["SUPABASE_URL"],
-    st.secrets["SUPABASE_KEY"]
-)
+SUPABASE_URL = "https://crujjurupavknjwdjjmj.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNydWpqdXJ1cGF2a25qd2Rqam1qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA5NjI0MTAsImV4cCI6MjA4NjUzODQxMH0.MdQDrEHOyQ0mI6HGX986lNMw5cpj5pfUCnKFh88pnzw"
 
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Connection check
 try:
     supabase.table("employees").select("emp_code", count="planned").limit(0).execute()

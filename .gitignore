@@ -51,3 +51,4 @@ ehthumbs.db
 # Windows junk
 Thumbs.db
 ehthumbs.db
+*.whl
