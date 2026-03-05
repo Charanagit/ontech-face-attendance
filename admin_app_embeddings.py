@@ -12,6 +12,20 @@ from supabase import create_client, Client
 from datetime import datetime
 import pytz
 
+import sys
+import traceback
+
+try:
+    from insightface.app import FaceAnalysis
+    print("InsightFace imported successfully!")
+except Exception as e:
+    print("CRITICAL: InsightFace import FAILED")
+    print("Exception type:", type(e).__name__)
+    print("Exception message:", str(e))
+    print("Full traceback:")
+    traceback.print_exc(file=sys.stdout)
+    raise  # keep the app crashing so we see it
+
 # ────────────────────────────────────────────────
 # Page config — MUST BE FIRST
 # ────────────────────────────────────────────────
