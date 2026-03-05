@@ -1,4 +1,0 @@
-libffi7
-libpcre3
-libglib2.0-0
-libgthread-2.0-0
