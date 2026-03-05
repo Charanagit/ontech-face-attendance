@@ -1,0 +1,1 @@
+web: bash setup.sh && streamlit run admin_app_embeddings.py --server.port $PORT
