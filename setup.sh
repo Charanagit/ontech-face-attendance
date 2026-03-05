@@ -1,6 +1,17 @@
 #!/bin/bash
-echo "Forcing NumPy 1.26.4 before other installs..."
-pip uninstall -y numpy
-pip install numpy==1.26.4 --no-cache-dir --force-reinstall
-pip install -r requirements.txt --no-cache-dir
-echo "Setup complete - NumPy locked to 1.26.4"
+set -e
+
+echo "=== SETUP.SH STARTED ==="
+echo "Python: $(python --version)"
+echo "Pip: $(pip --version)"
+
+echo "Force uninstall numpy..."
+pip uninstall -y numpy || true
+
+echo "Install pinned numpy wheel..."
+pip install numpy==1.26.4 --no-cache-dir --force-reinstall --verbose
+
+echo "Install rest of requirements..."
+pip install -r requirements.txt --no-cache-dir --verbose
+
+echo "=== SETUP.SH FINISHED ==="
