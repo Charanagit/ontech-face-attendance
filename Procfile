@@ -1,0 +1,1 @@
+web: bash ./post-install.sh && streamlit run admin_app_embeddings.py --server.port $PORT
